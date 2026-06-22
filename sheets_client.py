@@ -43,6 +43,12 @@ def _yn(value: str) -> bool:
     return (value or "").strip().lower() == "yes"
 
 
+def _yn3(value: str) -> str:
+    """'yes' / 'no' / '' (not filled in yet — must not be treated as a warning)."""
+    v = (value or "").strip().lower()
+    return v if v in ("yes", "no") else ""
+
+
 def _group_id(raw: str) -> str:
     return GROUP_NAME_TO_ID.get((raw or "").strip().lower(), "big")
 
@@ -131,8 +137,8 @@ def get_children() -> list[dict]:
             "allergyEn": (row.get("Allergies / notes") or "").strip(),
             "noteRu": "",
             "noteEn": "",
-            "paracetamol": _yn(row.get("Paracetamol")),
-            "photoConsent": _yn(row.get("Using Photos for Media")),
+            "paracetamol": _yn3(row.get("Paracetamol")),
+            "photoConsent": _yn3(row.get("Using Photos for Media")),
             "adaptation": _yn(row.get("Adaptation")),
             "parent1Name": (row.get("Parent name (1)") or "").strip(),
             "parent1Phone": (row.get("Parent contact (1)") or "").strip(),
