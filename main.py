@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from database import engine, get_db, Base
 import models
+import sheets_client
 
 Base.metadata.create_all(bind=engine)
 
@@ -20,29 +21,8 @@ app.add_middleware(CORSMiddleware,
 # ── Children ──────────────────────────────────────────────────────────────────
 
 @app.get("/children")
-def get_children(db: Session = Depends(get_db)):
-    kids = db.query(models.Child).all()
-    return [{"id": k.id, "name_ru": k.name_ru, "name_en": k.name_en,
-             "emoji": k.emoji, "group": k.group_id, "contract": k.contract} for k in kids]
-
-class ChildIn(BaseModel):
-    name_ru:  str
-    name_en:  str
-    emoji:    str
-    group_id: str
-    contract: str = "longterm"
-
-@app.post("/children")
-def add_child(data: ChildIn, db: Session = Depends(get_db)):
-    k = models.Child(**data.dict())
-    db.add(k); db.commit(); db.refresh(k)
-    return {"id": k.id}
-
-@app.delete("/children/{kid_id}")
-def delete_child(kid_id: int, db: Session = Depends(get_db)):
-    db.query(models.Child).filter_by(id=kid_id).delete()
-    db.commit()
-    return {"ok": True}
+def get_children():
+    return sheets_client.get_children()
 
 # ── Groups ────────────────────────────────────────────────────────────────────
 
