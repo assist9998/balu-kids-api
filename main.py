@@ -24,6 +24,16 @@ app.add_middleware(CORSMiddleware,
 def get_children():
     return sheets_client.get_children()
 
+class ChildEmojiIn(BaseModel):
+    emoji: str
+
+@app.put("/children/{child_id}/emoji")
+def set_child_emoji(child_id: str, data: ChildEmojiIn):
+    ok = sheets_client.set_child_emoji(child_id, data.emoji)
+    if not ok:
+        return {"ok": False, "error": "child not found"}
+    return {"ok": True}
+
 # ── Groups ────────────────────────────────────────────────────────────────────
 
 @app.get("/groups")
