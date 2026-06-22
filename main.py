@@ -21,17 +21,25 @@ app.add_middleware(CORSMiddleware,
 # ── Children ──────────────────────────────────────────────────────────────────
 
 @app.get("/children")
-def get_children():
-    return sheets_client.get_children()
+def get_children(db: Session = Depends(get_db)):
+    children = sheets_client.get_children()
+    avatars = {a.child_id: a.emoji for a in db.query(models.ChildAvatar).all()}
+    for c in children:
+        if c["id"] in avatars:
+            c["emoji"] = avatars[c["id"]]
+    return children
 
 class ChildEmojiIn(BaseModel):
     emoji: str
 
 @app.put("/children/{child_id}/emoji")
-def set_child_emoji(child_id: str, data: ChildEmojiIn):
-    ok = sheets_client.set_child_emoji(child_id, data.emoji)
-    if not ok:
-        return {"ok": False, "error": "child not found"}
+def set_child_emoji(child_id: str, data: ChildEmojiIn, db: Session = Depends(get_db)):
+    row = db.query(models.ChildAvatar).filter_by(child_id=child_id).first()
+    if row:
+        row.emoji = data.emoji
+    else:
+        db.add(models.ChildAvatar(child_id=child_id, emoji=data.emoji))
+    db.commit()
     return {"ok": True}
 
 # ── Groups ────────────────────────────────────────────────────────────────────

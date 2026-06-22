@@ -123,7 +123,7 @@ def get_children() -> list[dict]:
             "id": full_name,
             "ru": full_name,
             "en": full_name,
-            "emoji": (row.get("Emoji") or "").strip() or avatar_for_name(full_name),
+            "emoji": avatar_for_name(full_name),
             "group": _group_id(row.get("Group")),
             "contract": _contract(row.get("Contract type")),
             "dob": (row.get("Birthday") or "").strip(),
@@ -145,32 +145,3 @@ def get_children() -> list[dict]:
     _cache["children"] = children
     _cache["at"] = now
     return children
-
-
-def set_child_emoji(full_name: str, emoji: str) -> bool:
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values = ws.get_all_values()
-    if not values:
-        return False
-    headers = values[0]
-    try:
-        first_col = headers.index("First name")
-        last_col = headers.index("Last name")
-    except ValueError:
-        return False
-    if "Emoji" not in headers:
-        return False
-    emoji_col = headers.index("Emoji")
-
-    for i, raw in enumerate(values[1:], start=2):
-        first = (raw[first_col] if first_col < len(raw) else "").strip()
-        last = (raw[last_col] if last_col < len(raw) else "").strip()
-        if f"{first} {last}".strip() == full_name:
-            ws.update_cell(i, emoji_col + 1, emoji)
-            if _cache["children"] is not None:
-                for c in _cache["children"]:
-                    if c["id"] == full_name:
-                        c["emoji"] = emoji
-            return True
-    return False

@@ -62,3 +62,8 @@ class ClubPayment(Base):
     club_id = Column(Integer, ForeignKey("clubs.id"))
     kid_id  = Column(Integer, ForeignKey("children.id"))
     paid    = Column(Boolean, default=False)
+
+class ChildAvatar(Base):
+    __tablename__ = "child_avatars"
+    child_id = Column(String, primary_key=True)  # full name, matches Sheets-derived id
+    emoji    = Column(String)
