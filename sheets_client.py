@@ -114,10 +114,12 @@ def get_children() -> list[dict]:
             continue
         full_name = f"{first} {last}".strip()
 
+        meals_raw = (row.get("Meals included") or "").strip().lower()
         extra = {
             "address": (row.get("Address") or "").strip(),
             "deposit": (row.get("Deposit") or "").strip(),
-            "mealsIncluded": _yn(row.get("Meals included")),
+            "mealsIncluded": meals_raw in ("yes", "halal"),
+            "mealsHalal": meals_raw == "halal",
             "napTime": _yn(row.get("Nap time")),
             "afterSchool": _yn(row.get("After school")),
             "startDate": (row.get("Start date") or "").strip(),
