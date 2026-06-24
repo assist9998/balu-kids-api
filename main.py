@@ -104,9 +104,10 @@ def get_payments(month: str, db: Session = Depends(get_db)):
     return {r.kid_id: {"paid": r.paid, "days": r.days} for r in rows}
 
 class PaymentRow(BaseModel):
-    kid_id: int
+    kid_id: str
     paid:   bool
     days:   int = 1
+    amount: float = 0
 
 class PaymentsIn(BaseModel):
     month: str
@@ -118,6 +119,10 @@ def save_payments(data: PaymentsIn, db: Session = Depends(get_db)):
     for r in data.rows:
         db.add(models.Payment(month=data.month, kid_id=r.kid_id, paid=r.paid, days=r.days))
     db.commit()
+    try:
+        sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
+    except Exception as e:
+        print(f"upsert_payments to Sheets failed: {e}")
     return {"ok": True}
 
 # ── Club payments ─────────────────────────────────────────────────────────────

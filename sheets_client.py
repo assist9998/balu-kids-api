@@ -208,3 +208,67 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+
+def upsert_payments(month: str, rows: list) -> None:
+    """Mirror garden payments into Ольга's Payments sheet
+    (Month/Child/Group/Amount/Paid/Payment date). Club columns are left
+    alone — clubs aren't wired up to this yet."""
+    sh = _sheet()
+    ws = sh.worksheet("Payments")
+    values = ws.get_all_values()
+    headers = values[0] if values else ["Month", "Child", "Group", "Amount", "Paid", "Payment date"]
+    col = {h: i for i, h in enumerate(headers)}
+    month_i, child_i, group_i, amount_i, paid_i, pdate_i = (
+        col.get("Month", 0), col.get("Child", 1), col.get("Group"),
+        col.get("Amount"), col.get("Paid"), col.get("Payment date"),
+    )
+
+    groups = {}
+    try:
+        for row in _rows_as_dicts(sh.worksheet("Children").get_all_values()):
+            name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
+            if name:
+                groups[name] = (row.get("Group") or "").strip()
+    except gspread.WorksheetNotFound:
+        pass
+
+    existing_row_for = {}
+    for i, row in enumerate(values[1:], start=2):
+        m = row[month_i] if month_i < len(row) else ""
+        c = row[child_i] if child_i < len(row) else ""
+        if m == month and c:
+            existing_row_for[c] = i
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    updates, appends = [], []
+    for r in rows:
+        name, paid, amount = r["kid_id"], r["paid"], r["amount"]
+        paid_label = "Yes" if paid else "No"
+        if name in existing_row_for:
+            row_i = existing_row_for[name]
+            if amount_i is not None:
+                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
+            if paid_i is not None:
+                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, paid_i + 1), "values": [[paid_label]]})
+            if paid_i is not None and pdate_i is not None and paid:
+                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, pdate_i + 1), "values": [[today]]})
+        else:
+            managed_width = max(month_i, child_i, group_i or 0, amount_i or 0, paid_i or 0, pdate_i or 0) + 1
+            new_row = [""] * managed_width
+            new_row[month_i] = month
+            new_row[child_i] = name
+            if group_i is not None:
+                new_row[group_i] = groups.get(name, "")
+            if amount_i is not None:
+                new_row[amount_i] = amount
+            if paid_i is not None:
+                new_row[paid_i] = paid_label
+            if pdate_i is not None and paid:
+                new_row[pdate_i] = today
+            appends.append(new_row)
+
+    if updates:
+        ws.batch_update(updates)
+    if appends:
+        ws.append_rows(appends, value_input_option="USER_ENTERED")

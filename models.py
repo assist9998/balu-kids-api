@@ -51,7 +51,7 @@ class Payment(Base):
     __tablename__ = "payments"
     id     = Column(Integer, primary_key=True, autoincrement=True)
     month  = Column(String)   # jun / jul / aug / sep
-    kid_id = Column(Integer, ForeignKey("children.id"))
+    kid_id = Column(String)   # full name, matches Sheets-derived id (see ChildAvatar)
     paid   = Column(Boolean, default=False)
     days   = Column(Integer, default=1)   # для туристов
 
