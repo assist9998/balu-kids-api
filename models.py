@@ -44,7 +44,7 @@ class Attendance(Base):
     __tablename__ = "attendance"
     id     = Column(Integer, primary_key=True, autoincrement=True)
     date   = Column(String)   # YYYY-MM-DD
-    kid_id = Column(Integer, ForeignKey("children.id"))
+    kid_id = Column(String)   # full name, matches Sheets-derived id (see ChildAvatar)
     status = Column(String)   # present / absent
 
 class Payment(Base):

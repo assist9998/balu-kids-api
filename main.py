@@ -73,7 +73,7 @@ class AttendanceIn(BaseModel):
 def save_attendance(data: AttendanceIn, db: Session = Depends(get_db)):
     db.query(models.Attendance).filter_by(date=data.date).delete()
     for kid_id, status in data.statuses.items():
-        db.add(models.Attendance(date=data.date, kid_id=int(kid_id), status=status))
+        db.add(models.Attendance(date=data.date, kid_id=kid_id, status=status))
     db.commit()
     return {"ok": True}
 
