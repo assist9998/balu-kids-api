@@ -235,12 +235,15 @@ def upsert_attendance(date: str, statuses: dict) -> None:
 _MONTH_DAYS = {"jun": 30, "jul": 31, "aug": 31, "sep": 30}
 
 
-def _update_paid_until(sh, month: str, rows: list) -> None:
-    """Roll the "Paid until" date forward in Children for every kid marked
-    paid in this save.
+def _update_paid_until(sh, month: str, deltas: list) -> None:
+    """Roll the "Paid until" date forward in Children, but only by however
+    many days are genuinely *new* in this save (see upsert_payments, which
+    computes each kid's delta against what was already on record before
+    calling this) — re-saving an unchanged "Paid" checkbox must not add
+    days again, or every idle re-save would push the date further out.
 
     Tourists only attend days they've prepaid, so a late top-up starts
-    counting from today (max(today, old_date) + bought_days) — unpaid time
+    counting from today (max(today, old_date) + new_days) — unpaid time
     just meant the kid wasn't there.
 
     Long-term kids buy a whole calendar month in one go — the number of
@@ -271,16 +274,16 @@ def _update_paid_until(sh, month: str, rows: list) -> None:
 
     today = datetime.now().date()
     updates = []
-    for r in rows:
-        if not r.get("paid"):
-            continue
-        row_i = row_by_name.get(r["kid_id"])
+    for d in deltas:
+        row_i = row_by_name.get(d["kid_id"])
         if row_i is None:
             continue
         row_vals = values[row_i - 1]
         contract = (row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else "").strip().lower()
         is_tourist = contract == "tourist"
-        n_days = int(r.get("days") or 1) if is_tourist else _MONTH_DAYS.get(month, 30)
+        n_days = d["new_days"] if is_tourist else (_MONTH_DAYS.get(month, 30) if d["newly_paid"] else 0)
+        if n_days <= 0:
+            continue
 
         cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
         try:
@@ -355,12 +358,21 @@ def upsert_payments(month: str, rows: list) -> None:
             existing_row_for[c] = i
 
     today = datetime.now().strftime("%Y-%m-%d")
-    updates, appends = [], []
+    updates, appends, deltas = [], [], []
     for r in rows:
         name, paid, amount, days = r["kid_id"], r["paid"], r["amount"], r.get("days", 1)
         paid_label = "Yes" if paid else "No"
+        old_days, was_paid = 0, False
         if name in existing_row_for:
             row_i = existing_row_for[name]
+            old_row = values[row_i - 1]
+            if days_i is not None and days_i < len(old_row):
+                try:
+                    old_days = int(old_row[days_i])
+                except ValueError:
+                    old_days = 0
+            if paid_i is not None and paid_i < len(old_row):
+                was_paid = old_row[paid_i].strip().lower() == "yes"
             if amount_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
             if days_i is not None:
@@ -386,9 +398,12 @@ def upsert_payments(month: str, rows: list) -> None:
                 new_row[pdate_i] = today
             appends.append(new_row)
 
+        if paid:
+            deltas.append({"kid_id": name, "new_days": max(0, days - old_days), "newly_paid": not was_paid})
+
     if updates:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
-    _update_paid_until(sh, month, rows)
+    _update_paid_until(sh, month, deltas)
