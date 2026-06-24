@@ -127,6 +127,7 @@ def get_children() -> list[dict]:
             "clubPaymentType": (row.get("Club payment type") or "").strip(),
             "dayType": (row.get("Day type") or "").strip(),
             "price": (row.get("Price") or "").strip(),
+            "paidUntil": (row.get("Paid until") or "").strip(),
         }
 
         children.append({
@@ -212,6 +213,67 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
 
+def _update_paid_until(sh, rows: list) -> None:
+    """Roll the "Paid until" date forward in Children for every kid marked
+    paid in this save.
+
+    Tourists only attend days they've prepaid, so a late top-up starts
+    counting from today (max(today, old_date) + bought_days) — unpaid time
+    just meant the kid wasn't there.
+
+    Long-term kids keep attending every day regardless of payment status,
+    so a late payment settles a debt rather than buying fresh days: it
+    always adds 30 days to the *old* date, even if that's still in the
+    past — that surfaces as still-overdue if more than one cycle is owed."""
+    ws = sh.worksheet("Children")
+    values = ws.get_all_values()
+    if not values:
+        return
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    first_i, last_i = col.get("First name"), col.get("Last name")
+    contract_i, paiduntil_i = col.get("Contract type"), col.get("Paid until")
+    if first_i is None or last_i is None or paiduntil_i is None:
+        return
+
+    row_by_name = {}
+    for i, row in enumerate(values[1:], start=2):
+        first = row[first_i] if first_i < len(row) else ""
+        last = row[last_i] if last_i < len(row) else ""
+        name = f"{first} {last}".strip()
+        if name:
+            row_by_name[name] = i
+
+    today = datetime.now().date()
+    updates = []
+    for r in rows:
+        if not r.get("paid"):
+            continue
+        row_i = row_by_name.get(r["kid_id"])
+        if row_i is None:
+            continue
+        row_vals = values[row_i - 1]
+        contract = (row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else "").strip().lower()
+        is_tourist = contract == "tourist"
+        n_days = int(r.get("days") or 1) if is_tourist else 30
+
+        cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
+        try:
+            cur_date = datetime.strptime(cur_raw, "%Y-%m-%d").date()
+        except ValueError:
+            cur_date = today
+        base = max(today, cur_date) if is_tourist else cur_date
+        new_date = base + timedelta(days=n_days)
+
+        updates.append({
+            "range": gspread.utils.rowcol_to_a1(row_i, paiduntil_i + 1),
+            "values": [[new_date.strftime("%Y-%m-%d")]],
+        })
+
+    if updates:
+        ws.batch_update(updates)
+
+
 def upsert_payments(month: str, rows: list) -> None:
     """Mirror garden payments into Ольга's Payments sheet
     (Month/Child/Group/Amount/Paid/Payment date). Club columns are left
@@ -274,3 +336,5 @@ def upsert_payments(month: str, rows: list) -> None:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+    _update_paid_until(sh, rows)
