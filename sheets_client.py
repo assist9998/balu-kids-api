@@ -153,3 +153,57 @@ def get_children() -> list[dict]:
     _cache["children"] = children
     _cache["at"] = now
     return children
+
+
+_STATUS_LABEL = {"present": "Present", "absent": "Absent", "late": "Late"}
+
+
+def upsert_attendance(date: str, statuses: dict) -> None:
+    """Mirror today's attendance marks into Ольга's Attendance sheet
+    (Date/Child/Group/Status/Notes) so she can see them there too."""
+    sh = _sheet()
+    ws = sh.worksheet("Attendance")
+    values = ws.get_all_values()
+    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Notes"]
+    col = {h: i for i, h in enumerate(headers)}
+    date_i, child_i, group_i, status_i = (
+        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3),
+    )
+
+    groups = {}
+    try:
+        for row in _rows_as_dicts(sh.worksheet("Children").get_all_values()):
+            name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
+            if name:
+                groups[name] = (row.get("Group") or "").strip()
+    except gspread.WorksheetNotFound:
+        pass
+
+    existing_row_for = {}
+    for i, row in enumerate(values[1:], start=2):
+        d = row[date_i] if date_i < len(row) else ""
+        c = row[child_i] if child_i < len(row) else ""
+        if d == date and c:
+            existing_row_for[c] = i
+
+    updates, appends = [], []
+    for name, status in statuses.items():
+        label = _STATUS_LABEL.get(status, status.capitalize())
+        if name in existing_row_for:
+            updates.append({
+                "range": gspread.utils.rowcol_to_a1(existing_row_for[name], status_i + 1),
+                "values": [[label]],
+            })
+        else:
+            new_row = [""] * len(headers)
+            new_row[date_i] = date
+            new_row[child_i] = name
+            if group_i is not None:
+                new_row[group_i] = groups.get(name, "")
+            new_row[status_i] = label
+            appends.append(new_row)
+
+    if updates:
+        ws.batch_update(updates)
+    if appends:
+        ws.append_rows(appends, value_input_option="USER_ENTERED")

@@ -75,6 +75,10 @@ def save_attendance(data: AttendanceIn, db: Session = Depends(get_db)):
     for kid_id, status in data.statuses.items():
         db.add(models.Attendance(date=data.date, kid_id=kid_id, status=status))
     db.commit()
+    try:
+        sheets_client.upsert_attendance(data.date, data.statuses)
+    except Exception as e:
+        print(f"upsert_attendance to Sheets failed: {e}")
     return {"ok": True}
 
 # ── Payments ──────────────────────────────────────────────────────────────────
