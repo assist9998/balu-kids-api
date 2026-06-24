@@ -232,7 +232,10 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
 
-def _update_paid_until(sh, rows: list) -> None:
+_MONTH_DAYS = {"jun": 30, "jul": 31, "aug": 31, "sep": 30}
+
+
+def _update_paid_until(sh, month: str, rows: list) -> None:
     """Roll the "Paid until" date forward in Children for every kid marked
     paid in this save.
 
@@ -240,10 +243,13 @@ def _update_paid_until(sh, rows: list) -> None:
     counting from today (max(today, old_date) + bought_days) — unpaid time
     just meant the kid wasn't there.
 
-    Long-term kids keep attending every day regardless of payment status,
-    so a late payment settles a debt rather than buying fresh days: it
-    always adds 30 days to the *old* date, even if that's still in the
-    past — that surfaces as still-overdue if more than one cycle is owed."""
+    Long-term kids buy a whole calendar month in one go — the number of
+    days added is however many days are in the month tab being paid for
+    (30/31), not a flat 30, so paying tab-by-tab lines "Paid until" up
+    with real month boundaries instead of drifting. A late payment still
+    settles a debt rather than buying fresh days: it always adds onto the
+    *old* date, even if that's still in the past — that surfaces as
+    still-overdue if more than one cycle is owed."""
     ws = sh.worksheet("Children")
     values = ws.get_all_values()
     if not values:
@@ -274,7 +280,7 @@ def _update_paid_until(sh, rows: list) -> None:
         row_vals = values[row_i - 1]
         contract = (row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else "").strip().lower()
         is_tourist = contract == "tourist"
-        n_days = int(r.get("days") or 1) if is_tourist else 30
+        n_days = int(r.get("days") or 1) if is_tourist else _MONTH_DAYS.get(month, 30)
 
         cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
         try:
@@ -385,4 +391,4 @@ def upsert_payments(month: str, rows: list) -> None:
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
-    _update_paid_until(sh, rows)
+    _update_paid_until(sh, month, rows)
