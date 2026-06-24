@@ -125,6 +125,8 @@ def get_children() -> list[dict]:
             "startDate": (row.get("Start date") or "").strip(),
             "clubs": (row.get("Clubs") or "").strip(),
             "clubPaymentType": (row.get("Club payment type") or "").strip(),
+            "dayType": (row.get("Day type") or "").strip(),
+            "price": (row.get("Price") or "").strip(),
         }
 
         children.append({
