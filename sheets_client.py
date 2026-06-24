@@ -155,7 +155,7 @@ def get_children() -> list[dict]:
     return children
 
 
-_STATUS_LABEL = {"present": "Present", "absent": "Absent", "late": "Late"}
+_STATUS_LABEL = {"present": "Present", "absent": "Away", "late": "Away"}
 
 
 def upsert_attendance(date: str, statuses: dict) -> None:
