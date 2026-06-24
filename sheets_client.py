@@ -195,7 +195,8 @@ def upsert_attendance(date: str, statuses: dict) -> None:
                 "values": [[label]],
             })
         else:
-            new_row = [""] * len(headers)
+            managed_width = max(date_i, child_i, group_i or 0, status_i) + 1
+            new_row = [""] * managed_width
             new_row[date_i] = date
             new_row[child_i] = name
             if group_i is not None:
