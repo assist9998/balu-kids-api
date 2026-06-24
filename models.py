@@ -40,21 +40,6 @@ class Club(Base):
     price   = Column(Integer)
     kids    = relationship("Child", secondary=club_kids)
 
-class Attendance(Base):
-    __tablename__ = "attendance"
-    id     = Column(Integer, primary_key=True, autoincrement=True)
-    date   = Column(String)   # YYYY-MM-DD
-    kid_id = Column(String)   # full name, matches Sheets-derived id (see ChildAvatar)
-    status = Column(String)   # present / absent
-
-class Payment(Base):
-    __tablename__ = "payments"
-    id     = Column(Integer, primary_key=True, autoincrement=True)
-    month  = Column(String)   # jun / jul / aug / sep
-    kid_id = Column(String)   # full name, matches Sheets-derived id (see ChildAvatar)
-    paid   = Column(Boolean, default=False)
-    days   = Column(Integer, default=1)   # для туристов
-
 class ClubPayment(Base):
     __tablename__ = "club_payments"
     id      = Column(Integer, primary_key=True, autoincrement=True)

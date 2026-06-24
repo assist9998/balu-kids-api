@@ -161,6 +161,25 @@ def get_children() -> list[dict]:
 _STATUS_LABEL = {"present": "Present", "absent": "Away", "late": "Away"}
 
 
+def get_attendance(date: str) -> dict:
+    """Read today's marks straight from Ольга's Attendance sheet, so
+    anything she edits or deletes there is what the app shows."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Attendance")
+    except gspread.WorksheetNotFound:
+        return {}
+    result = {}
+    for row in _rows_as_dicts(ws.get_all_values()):
+        if (row.get("Date") or "").strip() != date:
+            continue
+        name = (row.get("Child") or "").strip()
+        if not name:
+            continue
+        result[name] = "present" if (row.get("Status") or "").strip().lower() == "present" else "absent"
+    return result
+
+
 def upsert_attendance(date: str, statuses: dict) -> None:
     """Mirror today's attendance marks into Ольга's Attendance sheet
     (Date/Child/Group/Status/Notes) so she can see them there too."""
@@ -274,18 +293,43 @@ def _update_paid_until(sh, rows: list) -> None:
         ws.batch_update(updates)
 
 
+def get_payments(month: str) -> dict:
+    """Read garden payment status straight from Ольга's Payments sheet, so
+    that anything she edits or deletes there is what the app shows — the
+    sheet is the source of truth, not a local copy."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Payments")
+    except gspread.WorksheetNotFound:
+        return {}
+    result = {}
+    for row in _rows_as_dicts(ws.get_all_values()):
+        if (row.get("Month") or "").strip() != month:
+            continue
+        name = (row.get("Child") or "").strip()
+        if not name:
+            continue
+        paid = (row.get("Paid") or "").strip().lower() == "yes"
+        try:
+            days = int((row.get("Days") or "1").strip())
+        except ValueError:
+            days = 1
+        result[name] = {"paid": paid, "days": days}
+    return result
+
+
 def upsert_payments(month: str, rows: list) -> None:
     """Mirror garden payments into Ольга's Payments sheet
-    (Month/Child/Group/Amount/Paid/Payment date). Club columns are left
-    alone — clubs aren't wired up to this yet."""
+    (Month/Child/Group/Amount/Days/Paid/Payment date). Club columns are
+    left alone — clubs aren't wired up to this yet."""
     sh = _sheet()
     ws = sh.worksheet("Payments")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Month", "Child", "Group", "Amount", "Paid", "Payment date"]
+    headers = values[0] if values else ["Month", "Child", "Group", "Amount", "Days", "Paid", "Payment date"]
     col = {h: i for i, h in enumerate(headers)}
-    month_i, child_i, group_i, amount_i, paid_i, pdate_i = (
+    month_i, child_i, group_i, amount_i, days_i, paid_i, pdate_i = (
         col.get("Month", 0), col.get("Child", 1), col.get("Group"),
-        col.get("Amount"), col.get("Paid"), col.get("Payment date"),
+        col.get("Amount"), col.get("Days"), col.get("Paid"), col.get("Payment date"),
     )
 
     groups = {}
@@ -307,18 +351,20 @@ def upsert_payments(month: str, rows: list) -> None:
     today = datetime.now().strftime("%Y-%m-%d")
     updates, appends = [], []
     for r in rows:
-        name, paid, amount = r["kid_id"], r["paid"], r["amount"]
+        name, paid, amount, days = r["kid_id"], r["paid"], r["amount"], r.get("days", 1)
         paid_label = "Yes" if paid else "No"
         if name in existing_row_for:
             row_i = existing_row_for[name]
             if amount_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
+            if days_i is not None:
+                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, days_i + 1), "values": [[days]]})
             if paid_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, paid_i + 1), "values": [[paid_label]]})
             if paid_i is not None and pdate_i is not None and paid:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, pdate_i + 1), "values": [[today]]})
         else:
-            managed_width = max(month_i, child_i, group_i or 0, amount_i or 0, paid_i or 0, pdate_i or 0) + 1
+            managed_width = max(month_i, child_i, group_i or 0, amount_i or 0, days_i or 0, paid_i or 0, pdate_i or 0) + 1
             new_row = [""] * managed_width
             new_row[month_i] = month
             new_row[child_i] = name
@@ -326,6 +372,8 @@ def upsert_payments(month: str, rows: list) -> None:
                 new_row[group_i] = groups.get(name, "")
             if amount_i is not None:
                 new_row[amount_i] = amount
+            if days_i is not None:
+                new_row[days_i] = days
             if paid_i is not None:
                 new_row[paid_i] = paid_label
             if pdate_i is not None and paid:

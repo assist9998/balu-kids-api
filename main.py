@@ -76,32 +76,23 @@ def get_clubs(db: Session = Depends(get_db)):
 # ── Attendance ────────────────────────────────────────────────────────────────
 
 @app.get("/attendance/{date}")
-def get_attendance(date: str, db: Session = Depends(get_db)):
-    rows = db.query(models.Attendance).filter_by(date=date).all()
-    return {r.kid_id: r.status for r in rows}
+def get_attendance(date: str):
+    return sheets_client.get_attendance(date)
 
 class AttendanceIn(BaseModel):
     date:     str
     statuses: dict  # {kid_id: status}
 
 @app.post("/attendance")
-def save_attendance(data: AttendanceIn, db: Session = Depends(get_db)):
-    db.query(models.Attendance).filter_by(date=data.date).delete()
-    for kid_id, status in data.statuses.items():
-        db.add(models.Attendance(date=data.date, kid_id=kid_id, status=status))
-    db.commit()
-    try:
-        sheets_client.upsert_attendance(data.date, data.statuses)
-    except Exception as e:
-        print(f"upsert_attendance to Sheets failed: {e}")
+def save_attendance(data: AttendanceIn):
+    sheets_client.upsert_attendance(data.date, data.statuses)
     return {"ok": True}
 
 # ── Payments ──────────────────────────────────────────────────────────────────
 
 @app.get("/payments/{month}")
-def get_payments(month: str, db: Session = Depends(get_db)):
-    rows = db.query(models.Payment).filter_by(month=month).all()
-    return {r.kid_id: {"paid": r.paid, "days": r.days} for r in rows}
+def get_payments(month: str):
+    return sheets_client.get_payments(month)
 
 class PaymentRow(BaseModel):
     kid_id: str
@@ -114,15 +105,8 @@ class PaymentsIn(BaseModel):
     rows:  list[PaymentRow]
 
 @app.post("/payments")
-def save_payments(data: PaymentsIn, db: Session = Depends(get_db)):
-    db.query(models.Payment).filter_by(month=data.month).delete()
-    for r in data.rows:
-        db.add(models.Payment(month=data.month, kid_id=r.kid_id, paid=r.paid, days=r.days))
-    db.commit()
-    try:
-        sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
-    except Exception as e:
-        print(f"upsert_payments to Sheets failed: {e}")
+def save_payments(data: PaymentsIn):
+    sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
     return {"ok": True}
 
 # ── Club payments ─────────────────────────────────────────────────────────────
