@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Depends
+import os
+
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -17,6 +19,19 @@ app.add_middleware(CORSMiddleware,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+class LoginIn(BaseModel):
+    password: str
+
+@app.post("/auth/login")
+def login(data: LoginIn):
+    if data.password == os.environ.get("DIRECTOR_PASSWORD"):
+        return {"role": "director"}
+    if data.password == os.environ.get("STAFF_PASSWORD"):
+        return {"role": "staff"}
+    raise HTTPException(status_code=401, detail="Invalid password")
 
 # ── Children ──────────────────────────────────────────────────────────────────
 
