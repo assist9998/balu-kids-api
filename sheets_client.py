@@ -341,12 +341,13 @@ def upsert_payments(month: str, rows: list) -> None:
         col.get("Amount"), col.get("Days"), col.get("Paid"), col.get("Payment date"),
     )
 
-    groups = {}
+    groups, contracts = {}, {}
     try:
         for row in _rows_as_dicts(sh.worksheet("Children").get_all_values()):
             name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
             if name:
                 groups[name] = (row.get("Group") or "").strip()
+                contracts[name] = _contract(row.get("Contract type"))
     except gspread.WorksheetNotFound:
         pass
 
@@ -361,6 +362,8 @@ def upsert_payments(month: str, rows: list) -> None:
     updates, appends, deltas = [], [], []
     for r in rows:
         name, paid, amount, days = r["kid_id"], r["paid"], r["amount"], r.get("days", 1)
+        is_tourist = contracts.get(name) == "tourist"
+        days_cell = days if is_tourist else ""  # "Days" only means anything for tourists
         paid_label = "Yes" if paid else "No"
         old_days, was_paid = 0, False
         if name in existing_row_for:
@@ -376,7 +379,7 @@ def upsert_payments(month: str, rows: list) -> None:
             if amount_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
             if days_i is not None:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, days_i + 1), "values": [[days]]})
+                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, days_i + 1), "values": [[days_cell]]})
             if paid_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, paid_i + 1), "values": [[paid_label]]})
             if paid_i is not None and pdate_i is not None and paid:
@@ -391,7 +394,7 @@ def upsert_payments(month: str, rows: list) -> None:
             if amount_i is not None:
                 new_row[amount_i] = amount
             if days_i is not None:
-                new_row[days_i] = days
+                new_row[days_i] = days_cell
             if paid_i is not None:
                 new_row[paid_i] = paid_label
             if pdate_i is not None and paid:
