@@ -79,6 +79,11 @@ def update_child_data(child_id: str, data: ChildDataIn):
     sheets_client.update_child(child_id, data.dict())
     return {"ok": True}
 
+@app.delete("/children/{child_id}")
+def delete_child_route(child_id: str):
+    sheets_client.delete_child(child_id)
+    return {"ok": True}
+
 @app.put("/children/{child_id}/emoji")
 def set_child_emoji(child_id: str, data: ChildEmojiIn, db: Session = Depends(get_db)):
     row = db.query(models.ChildAvatar).filter_by(child_id=child_id).first()

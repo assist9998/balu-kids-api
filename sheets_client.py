@@ -514,3 +514,22 @@ def add_child(data: dict) -> str:
     fn = str(data.get("firstName", "")).strip()
     ln = str(data.get("lastName", "")).strip()
     return f"{fn} {ln}".strip()
+
+
+def delete_child(child_id: str) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Children")
+    values = ws.get_all_values()
+    if not values:
+        raise ValueError("Children sheet is empty")
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    first_i, last_i = col.get("First name"), col.get("Last name")
+    for i, row in enumerate(values[1:], start=2):
+        first = row[first_i] if first_i is not None and first_i < len(row) else ""
+        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
+        if f"{first} {last}".strip() == child_id:
+            ws.delete_rows(i)
+            _cache["at"] = 0
+            return
+    raise ValueError(f"Child not found: {child_id}")
