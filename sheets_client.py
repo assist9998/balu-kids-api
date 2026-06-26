@@ -410,3 +410,107 @@ def upsert_payments(month: str, rows: list) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
     _update_paid_until(sh, month, deltas)
+
+
+# ── Child CRUD ────────────────────────────────────────────────────────────────
+
+_GROUP_ID_TO_SHEET = {
+    "toddler": "Toddler",
+    "middle":  "Middle",
+    "big":     "Big",
+    "primary": "Primary school",
+}
+
+_CHILD_FIELD_MAP = {
+    "firstName":     "First name",
+    "lastName":      "Last name",
+    "group":         "Group",
+    "birthday":      "Birthday",
+    "contractType":  "Contract type",
+    "dayType":       "Day type",
+    "price":         "Price",
+    "startDate":     "Start date",
+    "allergies":     "Allergies / notes",
+    "paracetamol":   "Paracetamol",
+    "photoConsent":  "Using Photos for Media",
+    "adaptation":    "Adaptation",
+    "mealsIncluded": "Meals included",
+    "napTime":       "Nap time",
+    "afterSchool":   "After school",
+    "parent1Name":   "Parent name (1)",
+    "parent1Phone":  "Parent contact (1)",
+    "parent2Name":   "Parent name (2)",
+    "parent2Phone":  "Parent contact (2)",
+    "address":       "Address",
+}
+
+
+def _cell_val(field: str, value) -> str:
+    if field == "group":
+        return _GROUP_ID_TO_SHEET.get(str(value), str(value))
+    if field == "contractType":
+        return "Tourist" if str(value) == "tourist" else "Longterm"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value) if value is not None else ""
+
+
+def update_child(old_id: str, data: dict) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Children")
+    values = ws.get_all_values()
+    if not values:
+        raise ValueError("Children sheet is empty")
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    first_i, last_i = col.get("First name"), col.get("Last name")
+
+    target_row = None
+    for i, row in enumerate(values[1:], start=2):
+        first = row[first_i] if first_i is not None and first_i < len(row) else ""
+        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
+        if f"{first} {last}".strip() == old_id:
+            target_row = i
+            break
+
+    if target_row is None:
+        raise ValueError(f"Child not found: {old_id}")
+
+    updates = []
+    for field, col_name in _CHILD_FIELD_MAP.items():
+        col_idx = col.get(col_name)
+        if col_idx is None or field not in data:
+            continue
+        updates.append({
+            "range": gspread.utils.rowcol_to_a1(target_row, col_idx + 1),
+            "values": [[_cell_val(field, data[field])]],
+        })
+
+    if updates:
+        ws.batch_update(updates)
+    _cache["at"] = 0
+
+
+def add_child(data: dict) -> str:
+    """Append a new child row. Returns the new child's full_name (= its ID)."""
+    sh = _sheet()
+    ws = sh.worksheet("Children")
+    values = ws.get_all_values()
+    if not values:
+        raise ValueError("Children sheet is empty")
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+
+    new_row = [""] * len(headers)
+    for field, col_name in _CHILD_FIELD_MAP.items():
+        col_idx = col.get(col_name)
+        if col_idx is None or field not in data:
+            continue
+        new_row[col_idx] = _cell_val(field, data[field])
+
+    ws.append_rows([new_row], value_input_option="USER_ENTERED")
+    _cache["at"] = 0
+
+    fn = str(data.get("firstName", "")).strip()
+    ln = str(data.get("lastName", "")).strip()
+    return f"{fn} {ln}".strip()

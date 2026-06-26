@@ -47,6 +47,38 @@ def get_children(db: Session = Depends(get_db)):
 class ChildEmojiIn(BaseModel):
     emoji: str
 
+class ChildDataIn(BaseModel):
+    firstName:    str
+    lastName:     str = ""
+    group:        str = "big"
+    birthday:     str = ""
+    contractType: str = "longterm"
+    dayType:      str = ""
+    price:        str = ""
+    startDate:    str = ""
+    allergies:    str = ""
+    paracetamol:  str = ""
+    photoConsent: str = ""
+    adaptation:   bool = False
+    mealsIncluded: str = ""
+    napTime:      bool = False
+    afterSchool:  bool = False
+    parent1Name:  str = ""
+    parent1Phone: str = ""
+    parent2Name:  str = ""
+    parent2Phone: str = ""
+    address:      str = ""
+
+@app.post("/children")
+def create_child(data: ChildDataIn):
+    new_id = sheets_client.add_child(data.dict())
+    return {"ok": True, "id": new_id}
+
+@app.put("/children/{child_id}")
+def update_child_data(child_id: str, data: ChildDataIn):
+    sheets_client.update_child(child_id, data.dict())
+    return {"ok": True}
+
 @app.put("/children/{child_id}/emoji")
 def set_child_emoji(child_id: str, data: ChildEmojiIn, db: Session = Depends(get_db)):
     row = db.query(models.ChildAvatar).filter_by(child_id=child_id).first()
