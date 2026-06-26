@@ -81,7 +81,10 @@ def update_child_data(child_id: str, data: ChildDataIn):
 
 @app.delete("/children/{child_id}")
 def delete_child_route(child_id: str):
-    sheets_client.delete_child(child_id)
+    try:
+        sheets_client.delete_child(child_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"ok": True}
 
 @app.put("/children/{child_id}/emoji")
