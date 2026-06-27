@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Table
 from sqlalchemy.orm import relationship
 from database import Base
+from datetime import datetime, timezone
 
 club_kids = Table("club_kids", Base.metadata,
     Column("club_id", Integer, ForeignKey("clubs.id")),
@@ -50,5 +51,15 @@ class ClubPayment(Base):
 
 class ChildAvatar(Base):
     __tablename__ = "child_avatars"
-    child_id = Column(String, primary_key=True)  # full name, matches Sheets-derived id
+    child_id = Column(String, primary_key=True)
     emoji    = Column(String)
+
+class FeedItem(Base):
+    __tablename__ = "feed_items"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    type       = Column(String, default="alert")
+    emoji      = Column(String, default="📋")
+    ru         = Column(String, default="")
+    en         = Column(String, default="")
+    unread     = Column(Boolean, default=True)
+    created_at = Column(String, default="")

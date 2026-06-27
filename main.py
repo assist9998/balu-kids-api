@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -147,6 +148,53 @@ class PaymentsIn(BaseModel):
 @app.post("/payments")
 def save_payments(data: PaymentsIn):
     sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
+    return {"ok": True}
+
+# ── Feed ──────────────────────────────────────────────────────────────────────
+
+def _feed_dict(i):
+    return {"id": i.id, "type": i.type, "emoji": i.emoji,
+            "ru": i.ru, "en": i.en, "unread": i.unread, "created_at": i.created_at}
+
+@app.get("/feed")
+def get_feed(db: Session = Depends(get_db)):
+    items = db.query(models.FeedItem).order_by(models.FeedItem.id.desc()).all()
+    return [_feed_dict(i) for i in items]
+
+class FeedItemIn(BaseModel):
+    type:  str = "alert"
+    emoji: str = "📋"
+    ru:    str
+    en:    str = ""
+
+@app.post("/feed")
+def create_feed_item(data: FeedItemIn, db: Session = Depends(get_db)):
+    item = models.FeedItem(
+        type=data.type, emoji=data.emoji, ru=data.ru, en=data.en,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    db.add(item); db.commit(); db.refresh(item)
+    return _feed_dict(item)
+
+@app.patch("/feed/read-all")
+def mark_all_read(db: Session = Depends(get_db)):
+    db.query(models.FeedItem).filter_by(unread=True).update({"unread": False})
+    db.commit()
+    return {"ok": True}
+
+@app.patch("/feed/{item_id}/read")
+def mark_feed_read(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(models.FeedItem).filter_by(id=item_id).first()
+    if item:
+        item.unread = False; db.commit()
+    return {"ok": True}
+
+@app.delete("/feed/{item_id}")
+def delete_feed_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(models.FeedItem).filter_by(id=item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+    db.delete(item); db.commit()
     return {"ok": True}
 
 # ── Club payments ─────────────────────────────────────────────────────────────
