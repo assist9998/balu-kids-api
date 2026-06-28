@@ -533,3 +533,122 @@ def delete_child(child_id: str) -> None:
             _cache["at"] = 0
             return
     raise ValueError(f"Child not found: {child_id}")
+
+
+def get_staff() -> list[dict]:
+    """Read from Staff sheet. Columns: Name, Position, Contract End, Phone, Password.
+    Returns password too — caller must strip it before sending to the frontend."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Staff")
+    except gspread.WorksheetNotFound:
+        return []
+    rows = ws.get_all_records()
+    result = []
+    for r in rows:
+        name = str(r.get("Name", "")).strip()
+        if not name:
+            continue
+        result.append({
+            "name":        name,
+            "position":    str(r.get("Position", "")).strip(),
+            "contractEnd": str(r.get("Contract End", "")).strip(),
+            "phone":       str(r.get("Phone", "")).strip(),
+            "password":    str(r.get("Password", "")).strip(),
+        })
+    return result
+
+
+_STAFF_FIELDS = ["Name", "Position", "Contract End", "Phone", "Password"]
+
+
+def add_staff(data: dict) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Staff")
+    values = ws.get_all_values()
+    headers = values[0] if values else _STAFF_FIELDS
+    col = {h: i for i, h in enumerate(headers)}
+    new_row = [""] * len(headers)
+    for field in _STAFF_FIELDS:
+        idx = col.get(field)
+        if idx is not None:
+            new_row[idx] = str(data.get(field, ""))
+    ws.append_rows([new_row], value_input_option="USER_ENTERED")
+
+
+def update_staff(old_name: str, data: dict) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Staff")
+    values = ws.get_all_values()
+    if not values:
+        raise ValueError("Staff sheet is empty")
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    name_i = col.get("Name")
+    if name_i is None:
+        raise ValueError("Staff sheet has no Name column")
+    target_row = None
+    for i, row in enumerate(values[1:], start=2):
+        if (row[name_i] if name_i < len(row) else "").strip() == old_name:
+            target_row = i
+            break
+    if target_row is None:
+        raise ValueError(f"Staff not found: {old_name}")
+    updates = []
+    for field in _STAFF_FIELDS:
+        idx = col.get(field)
+        if idx is not None and field in data:
+            updates.append({
+                "range": gspread.utils.rowcol_to_a1(target_row, idx + 1),
+                "values": [[str(data[field])]],
+            })
+    if updates:
+        ws.batch_update(updates)
+
+
+def delete_staff(name: str) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Staff")
+    values = ws.get_all_values()
+    if not values:
+        raise ValueError("Staff sheet is empty")
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    name_i = col.get("Name")
+    for i, row in enumerate(values[1:], start=2):
+        if (row[name_i] if name_i is not None and name_i < len(row) else "").strip() == name:
+            ws.delete_rows(i)
+            return
+    raise ValueError(f"Staff not found: {name}")
+
+
+def get_clubs_from_sheets() -> list[dict]:
+    sh = _sheet()
+    ws = sh.worksheet("Clubs")
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return []
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    clubs = []
+    for row in values[1:]:
+        def g(h): return row[col[h]].strip() if h in col and col[h] < len(row) else ""
+        name_ru = g("Name")
+        if not name_ru:
+            continue
+        price_str = g("Price")
+        price = None
+        if price_str:
+            try:
+                price = int(float(price_str.replace(" ", "").replace(",", ".")))
+            except ValueError:
+                pass
+        clubs.append({
+            "name_ru": name_ru,
+            "name_en": g("Name (EN)"),
+            "emoji":   g("Emoji"),
+            "days":    g("Days"),
+            "time":    g("Time"),
+            "price":   price,
+        })
+    return clubs

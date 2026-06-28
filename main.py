@@ -3,15 +3,46 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
 
-from database import engine, get_db, Base
+from database import engine, get_db, Base, SessionLocal
 import models
 import sheets_client
 
-Base.metadata.create_all(bind=engine)
+def _migrate():
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    with engine.connect() as conn:
+        # Drop old tables that changed schema (no real data yet)
+        if "club_members" not in tables:
+            conn.execute(text("DROP TABLE IF EXISTS club_payments"))
+            conn.execute(text("DROP TABLE IF EXISTS club_kids"))
+            conn.commit()
+    Base.metadata.create_all(bind=engine)
+
+def _seed_clubs(db: Session):
+    if db.query(models.Club).count() > 0:
+        return
+    clubs = [
+        models.Club(name_ru="Шахматы", name_en="Chess", emoji="♟️",
+                    color="#CDE8FB", ink="#1f5f86",
+                    days_ru="Пн, Ср", days_en="Mon, Wed", time="15:00"),
+        models.Club(name_ru="Плавание", name_en="Swimming", emoji="🏊",
+                    color="#D4F0DF", ink="#1f7a55",
+                    days_ru="Вт, Пт", days_en="Tue, Fri", time="16:00"),
+    ]
+    db.add_all(clubs)
+    db.commit()
+
+_migrate()
+_db = SessionLocal()
+try:
+    _seed_clubs(_db)
+finally:
+    _db.close()
 
 app = FastAPI()
 
@@ -32,7 +63,91 @@ def login(data: LoginIn):
         return {"role": "director"}
     if data.password == os.environ.get("STAFF_PASSWORD"):
         return {"role": "staff"}
+    # Check individual teacher passwords from Staff sheet
+    try:
+        for s in sheets_client.get_staff():
+            if s["password"] and data.password == s["password"]:
+                return {"role": "teacher", "name": s["name"]}
+    except Exception:
+        pass
     raise HTTPException(status_code=401, detail="Invalid password")
+
+# ── Staff ─────────────────────────────────────────────────────────────────────
+
+class StaffIn(BaseModel):
+    name:        str
+    position:    str = ""
+    contractEnd: str = ""
+    phone:       str = ""
+    password:    str = ""
+
+@app.get("/staff")
+def get_staff():
+    staff = sheets_client.get_staff()
+    return [{"name": s["name"], "position": s["position"],
+             "contractEnd": s["contractEnd"], "phone": s["phone"]} for s in staff]
+
+@app.post("/staff")
+def create_staff(data: StaffIn):
+    sheets_client.add_staff({
+        "Name": data.name, "Position": data.position,
+        "Contract End": data.contractEnd, "Phone": data.phone, "Password": data.password,
+    })
+    return {"ok": True}
+
+@app.put("/staff/{old_name}")
+def update_staff(old_name: str, data: StaffIn):
+    try:
+        sheets_client.update_staff(old_name, {
+            "Name": data.name, "Position": data.position,
+            "Contract End": data.contractEnd, "Phone": data.phone, "Password": data.password,
+        })
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+@app.delete("/staff/{name}")
+def delete_staff(name: str):
+    try:
+        sheets_client.delete_staff(name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+@app.get("/staff-attendance/{date}")
+def get_staff_attendance(date: str, db: Session = Depends(get_db)):
+    rows = db.query(models.StaffAttendance).filter_by(date=date).all()
+    return {r.staff_name: {"status": r.status, "arrival_time": r.arrival_time or "", "note": r.note or ""}
+            for r in rows}
+
+class StaffAttendanceIn(BaseModel):
+    date:    str
+    records: dict  # {name: {status, arrival_time?, note?}}
+
+@app.post("/staff-attendance")
+def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)):
+    db.query(models.StaffAttendance).filter_by(date=data.date).delete()
+    for name, rec in data.records.items():
+        db.add(models.StaffAttendance(
+            date=data.date, staff_name=name,
+            status=rec.get("status", "present"),
+            arrival_time=rec.get("arrival_time") or None,
+            note=rec.get("note") or None,
+        ))
+    db.commit()
+    return {"ok": True}
+
+@app.get("/staff-attendance-month/{month}")
+def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
+    rows = db.query(models.StaffAttendance).filter(
+        models.StaffAttendance.date.like(f"{month}%")
+    ).all()
+    result: dict = {}
+    for r in rows:
+        if r.staff_name not in result:
+            result[r.staff_name] = {}
+        result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or ""}
+    return result
 
 # ── Children ──────────────────────────────────────────────────────────────────
 
@@ -106,13 +221,78 @@ def get_groups(db: Session = Depends(get_db)):
 
 # ── Clubs ─────────────────────────────────────────────────────────────────────
 
+def _club_dict(c, price_override=None):
+    return {"id": c.id, "name_ru": c.name_ru, "name_en": c.name_en,
+            "emoji": c.emoji, "color": c.color, "ink": c.ink,
+            "days_ru": c.days_ru, "days_en": c.days_en, "time": c.time,
+            "price": price_override if price_override is not None else c.price,
+            "kids": [m.child_id for m in c.members]}
+
 @app.get("/clubs")
 def get_clubs(db: Session = Depends(get_db)):
     clubs = db.query(models.Club).all()
-    return [{"id": c.id, "name_ru": c.name_ru, "name_en": c.name_en,
-             "emoji": c.emoji, "color": c.color, "ink": c.ink,
-             "days_ru": c.days_ru, "days_en": c.days_en, "time": c.time,
-             "price": c.price, "kids": [k.id for k in c.kids]} for c in clubs]
+    # Merge prices and schedule from Sheets (Olga edits there)
+    try:
+        sheet_clubs = sheets_client.get_clubs_from_sheets()
+        price_map = {s["name_ru"]: s for s in sheet_clubs}
+    except Exception:
+        price_map = {}
+
+    result = []
+    for c in clubs:
+        sheet = price_map.get(c.name_ru, {})
+        d = _club_dict(c)
+        if sheet.get("price") is not None:
+            d["price"] = sheet["price"]
+        if sheet.get("days"):
+            days = sheet["days"]
+            if "/" in days:
+                parts = [p.strip() for p in days.split("/")]
+                d["days_ru"] = parts[0]
+                d["days_en"] = parts[1] if len(parts) > 1 else parts[0]
+            else:
+                d["days_ru"] = days
+                d["days_en"] = days
+        if sheet.get("time"):
+            d["time"] = sheet["time"]
+        result.append(d)
+    return result
+
+@app.post("/clubs/{club_id}/members/{child_id}")
+def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
+    if not db.query(models.Club).filter_by(id=club_id).first():
+        raise HTTPException(status_code=404, detail="Club not found")
+    existing = db.query(models.ClubMember).filter_by(club_id=club_id, child_id=child_id).first()
+    if not existing:
+        db.add(models.ClubMember(club_id=club_id, child_id=child_id))
+        db.commit()
+    return {"ok": True}
+
+@app.delete("/clubs/{club_id}/members/{child_id}")
+def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
+    row = db.query(models.ClubMember).filter_by(club_id=club_id, child_id=child_id).first()
+    if row:
+        db.delete(row)
+        db.commit()
+    return {"ok": True}
+
+@app.get("/club-attendance/{club_id}/{date}")
+def get_club_attendance(club_id: int, date: str, db: Session = Depends(get_db)):
+    rows = db.query(models.ClubAttendance).filter_by(club_id=club_id, date=date).all()
+    return {r.child_id: r.status for r in rows}
+
+class ClubAttendanceIn(BaseModel):
+    date:     str
+    statuses: dict  # {child_id: "present" | "absent"}
+
+@app.post("/club-attendance/{club_id}")
+def save_club_attendance(club_id: int, data: ClubAttendanceIn, db: Session = Depends(get_db)):
+    db.query(models.ClubAttendance).filter_by(club_id=club_id, date=data.date).delete()
+    for child_id, status in data.statuses.items():
+        db.add(models.ClubAttendance(club_id=club_id, date=data.date,
+                                      child_id=child_id, status=status))
+    db.commit()
+    return {"ok": True}
 
 # ── Attendance ────────────────────────────────────────────────────────────────
 
@@ -214,6 +394,6 @@ def save_club_payments(data: ClubPaymentsIn, db: Session = Depends(get_db)):
     db.query(models.ClubPayment).filter_by(month=data.month, club_id=data.club_id).delete()
     for kid_id, paid in data.paid.items():
         db.add(models.ClubPayment(month=data.month, club_id=data.club_id,
-                                   kid_id=int(kid_id), paid=paid))
+                                   kid_id=str(kid_id), paid=paid))
     db.commit()
     return {"ok": True}

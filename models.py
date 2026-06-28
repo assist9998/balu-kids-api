@@ -1,12 +1,6 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
-from datetime import datetime, timezone
-
-club_kids = Table("club_kids", Base.metadata,
-    Column("club_id", Integer, ForeignKey("clubs.id")),
-    Column("kid_id",  Integer, ForeignKey("children.id")),
-)
 
 class Group(Base):
     __tablename__ = "groups"
@@ -16,16 +10,6 @@ class Group(Base):
     color   = Column(String)
     ink     = Column(String)
     emoji   = Column(String)
-
-class Child(Base):
-    __tablename__ = "children"
-    id       = Column(Integer, primary_key=True, autoincrement=True)
-    name_ru  = Column(String)
-    name_en  = Column(String)
-    emoji    = Column(String)
-    group_id = Column(String, ForeignKey("groups.id"))
-    contract = Column(String, default="longterm")  # longterm / tourist
-    group    = relationship("Group")
 
 class Club(Base):
     __tablename__ = "clubs"
@@ -38,15 +22,29 @@ class Club(Base):
     days_ru = Column(String)
     days_en = Column(String)
     time    = Column(String)
-    price   = Column(Integer)
-    kids    = relationship("Child", secondary=club_kids)
+    price   = Column(Integer, nullable=True)
+    members = relationship("ClubMember", back_populates="club", cascade="all, delete-orphan")
+
+class ClubMember(Base):
+    __tablename__ = "club_members"
+    club_id  = Column(Integer, ForeignKey("clubs.id"), primary_key=True)
+    child_id = Column(String, primary_key=True)  # "First Last" from Sheets
+    club     = relationship("Club", back_populates="members")
+
+class ClubAttendance(Base):
+    __tablename__ = "club_attendance"
+    id       = Column(Integer, primary_key=True, autoincrement=True)
+    club_id  = Column(Integer, ForeignKey("clubs.id"))
+    date     = Column(String)   # "YYYY-MM-DD"
+    child_id = Column(String)   # "First Last"
+    status   = Column(String, default="present")
 
 class ClubPayment(Base):
     __tablename__ = "club_payments"
     id      = Column(Integer, primary_key=True, autoincrement=True)
     month   = Column(String)
     club_id = Column(Integer, ForeignKey("clubs.id"))
-    kid_id  = Column(Integer, ForeignKey("children.id"))
+    kid_id  = Column(String)    # "First Last"
     paid    = Column(Boolean, default=False)
 
 class ChildAvatar(Base):
@@ -63,3 +61,12 @@ class FeedItem(Base):
     en         = Column(String, default="")
     unread     = Column(Boolean, default=True)
     created_at = Column(String, default="")
+
+class StaffAttendance(Base):
+    __tablename__ = "staff_attendance"
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    date         = Column(String)   # "YYYY-MM-DD"
+    staff_name   = Column(String)   # "First Last" from Sheets Staff tab
+    status       = Column(String, default="present")  # present/absent/late/sick/day-off/unpaid/extra
+    arrival_time = Column(String, nullable=True)  # "09:15" — only set for 'late'
+    note         = Column(String, nullable=True)
