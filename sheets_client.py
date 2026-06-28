@@ -555,11 +555,12 @@ def get_staff() -> list[dict]:
             "contractEnd": str(r.get("Contract End", "")).strip(),
             "phone":       str(r.get("Phone", "")).strip(),
             "password":    str(r.get("Password", "")).strip(),
+            "rate":        str(r.get("Rate", "")).strip(),
         })
     return result
 
 
-_STAFF_FIELDS = ["Name", "Position", "Contract End", "Phone", "Password"]
+_STAFF_FIELDS = ["Name", "Position", "Contract End", "Phone", "Password", "Rate"]
 
 
 def add_staff(data: dict) -> None:

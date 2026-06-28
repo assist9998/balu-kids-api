@@ -80,28 +80,34 @@ class StaffIn(BaseModel):
     contractEnd: str = ""
     phone:       str = ""
     password:    str = ""
+    rate:        str = ""
 
 @app.get("/staff")
 def get_staff():
     staff = sheets_client.get_staff()
     return [{"name": s["name"], "position": s["position"],
-             "contractEnd": s["contractEnd"], "phone": s["phone"]} for s in staff]
+             "contractEnd": s["contractEnd"], "phone": s["phone"],
+             "rate": s["rate"]} for s in staff]
 
 @app.post("/staff")
 def create_staff(data: StaffIn):
     sheets_client.add_staff({
         "Name": data.name, "Position": data.position,
-        "Contract End": data.contractEnd, "Phone": data.phone, "Password": data.password,
+        "Contract End": data.contractEnd, "Phone": data.phone,
+        "Password": data.password, "Rate": data.rate,
     })
     return {"ok": True}
 
 @app.put("/staff/{old_name}")
 def update_staff(old_name: str, data: StaffIn):
+    payload = {
+        "Name": data.name, "Position": data.position,
+        "Contract End": data.contractEnd, "Phone": data.phone, "Rate": data.rate,
+    }
+    if data.password:  # only update password if provided
+        payload["Password"] = data.password
     try:
-        sheets_client.update_staff(old_name, {
-            "Name": data.name, "Position": data.position,
-            "Contract End": data.contractEnd, "Phone": data.phone, "Password": data.password,
-        })
+        sheets_client.update_staff(old_name, payload)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"ok": True}
