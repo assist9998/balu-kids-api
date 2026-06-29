@@ -143,6 +143,30 @@ def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)
     db.commit()
     return {"ok": True}
 
+class StaffAttendanceSingleIn(BaseModel):
+    status:       str = "present"
+    arrival_time: str = ""
+    note:         str = ""
+
+@app.put("/staff-attendance/{date}/{staff_name}")
+def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttendanceSingleIn, db: Session = Depends(get_db)):
+    row = db.query(models.StaffAttendance).filter_by(date=date, staff_name=staff_name).first()
+    if row:
+        row.status = data.status
+        row.arrival_time = data.arrival_time or None
+        row.note = data.note or None
+    else:
+        db.add(models.StaffAttendance(date=date, staff_name=staff_name,
+            status=data.status, arrival_time=data.arrival_time or None, note=data.note or None))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/staff-attendance/{date}/{staff_name}")
+def delete_single_staff_attendance(date: str, staff_name: str, db: Session = Depends(get_db)):
+    db.query(models.StaffAttendance).filter_by(date=date, staff_name=staff_name).delete()
+    db.commit()
+    return {"ok": True}
+
 @app.get("/staff-attendance-month/{month}")
 def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
     rows = db.query(models.StaffAttendance).filter(
