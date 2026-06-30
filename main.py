@@ -210,7 +210,6 @@ class ChildDataIn(BaseModel):
     napTime:      bool = False
     afterSchool:  bool = False
     deposit:      str = ""
-    clubPaymentType: str = ""
     paidUntil:    str = ""
     parent1Name:  str = ""
     parent1Phone: str = ""
