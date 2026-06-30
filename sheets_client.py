@@ -438,7 +438,6 @@ _CHILD_FIELD_MAP = {
     "napTime":       "Nap time",
     "afterSchool":   "After school",
     "deposit":        "Deposit",
-    "clubPaymentType":"Club payment type",
     "paidUntil":      "Paid until",
     "parent1Name":   "Parent name (1)",
     "parent1Phone":  "Parent contact (1)",
