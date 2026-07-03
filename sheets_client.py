@@ -39,17 +39,27 @@ def avatar_for_name(name: str) -> str:
     return EMOJI_SET[h]
 
 
-def _to_dots(s: str) -> str:
-    """Normalize any YYYY-MM-DD or YYYY.MM.DD date string to YYYY.MM.DD."""
+def _to_dmy(s: str) -> str:
+    """Convert any YYYY-MM-DD or YYYY.MM.DD or DD.MM.YYYY to DD.MM.YYYY."""
     s = (s or "").strip()
-    return s.replace("-", ".") if s else s
+    if not s:
+        return s
+    parts = s.replace(".", "-").split("-")
+    if len(parts) == 3 and len(parts[0]) == 4:
+        return f"{parts[2]}.{parts[1]}.{parts[0]}"
+    # already DD.MM.YYYY or unrecognized — return with dots
+    return s.replace("-", ".")
 
 
 def _parse_ymd(s: str):
-    """Parse YYYY-MM-DD or YYYY.MM.DD → date object, or None."""
-    s = (s or "").strip().replace(".", "-")
+    """Parse DD.MM.YYYY or YYYY-MM-DD or YYYY.MM.DD → date object, or None."""
+    s = (s or "").strip()
     try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
+        return datetime.strptime(s, "%d.%m.%Y").date()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s.replace(".", "-"), "%Y-%m-%d").date()
     except ValueError:
         return None
 
@@ -142,7 +152,7 @@ def get_children() -> list[dict]:
             "clubPaymentType": (row.get("Club payment type") or "").strip(),
             "dayType": (row.get("Day type") or "").strip(),
             "price": (row.get("Price") or "").strip(),
-            "paidUntil": _to_dots((row.get("Paid until") or "").strip()),
+            "paidUntil": _to_dmy((row.get("Paid until") or "").strip()),
         }
 
         children.append({
@@ -307,7 +317,7 @@ def _update_paid_until(sh, month: str, deltas: list) -> None:
 
         updates.append({
             "range": gspread.utils.rowcol_to_a1(row_i, paiduntil_i + 1),
-            "values": [[new_date.strftime("%Y.%m.%d")]],
+            "values": [[new_date.strftime("%d.%m.%Y")]],
         })
 
     if updates:
@@ -475,7 +485,7 @@ def _cell_val(field: str, value) -> str:
         if v == "yes":   return "Yes"
         return ""
     if field == "paidUntil":
-        return _to_dots(str(value)) if value else ""
+        return _to_dmy(str(value)) if value else ""
     return str(value) if value is not None else ""
 
 
