@@ -39,6 +39,21 @@ def avatar_for_name(name: str) -> str:
     return EMOJI_SET[h]
 
 
+def _to_dots(s: str) -> str:
+    """Normalize any YYYY-MM-DD or YYYY.MM.DD date string to YYYY.MM.DD."""
+    s = (s or "").strip()
+    return s.replace("-", ".") if s else s
+
+
+def _parse_ymd(s: str):
+    """Parse YYYY-MM-DD or YYYY.MM.DD → date object, or None."""
+    s = (s or "").strip().replace(".", "-")
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def _yn(value: str) -> bool:
     return (value or "").strip().lower() == "yes"
 
@@ -127,7 +142,7 @@ def get_children() -> list[dict]:
             "clubPaymentType": (row.get("Club payment type") or "").strip(),
             "dayType": (row.get("Day type") or "").strip(),
             "price": (row.get("Price") or "").strip(),
-            "paidUntil": (row.get("Paid until") or "").strip(),
+            "paidUntil": _to_dots((row.get("Paid until") or "").strip()),
         }
 
         children.append({
@@ -286,16 +301,13 @@ def _update_paid_until(sh, month: str, deltas: list) -> None:
             continue
 
         cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
-        try:
-            cur_date = datetime.strptime(cur_raw, "%Y-%m-%d").date()
-        except ValueError:
-            cur_date = today
+        cur_date = _parse_ymd(cur_raw) or today
         base = max(today, cur_date) if is_tourist else cur_date
         new_date = base + timedelta(days=n_days)
 
         updates.append({
             "range": gspread.utils.rowcol_to_a1(row_i, paiduntil_i + 1),
-            "values": [[new_date.strftime("%Y-%m-%d")]],
+            "values": [[new_date.strftime("%Y.%m.%d")]],
         })
 
     if updates:
@@ -462,6 +474,8 @@ def _cell_val(field: str, value) -> str:
         if v == "halal": return "Halal"
         if v == "yes":   return "Yes"
         return ""
+    if field == "paidUntil":
+        return _to_dots(str(value)) if value else ""
     return str(value) if value is not None else ""
 
 
