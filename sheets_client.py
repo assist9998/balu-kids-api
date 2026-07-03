@@ -451,9 +451,17 @@ def _cell_val(field: str, value) -> str:
     if field == "group":
         return _GROUP_ID_TO_SHEET.get(str(value), str(value))
     if field == "contractType":
-        return "Tourist" if str(value) == "tourist" else "Longterm"
+        return "Tourist" if str(value) == "tourist" else "Long term"
     if isinstance(value, bool):
-        return "yes" if value else "no"
+        return "Yes" if value else "No"
+    if field in ("paracetamol", "photoConsent"):
+        v = str(value).strip().lower()
+        return "Yes" if v == "yes" else "No" if v == "no" else ""
+    if field == "mealsIncluded":
+        v = str(value).strip().lower()
+        if v == "halal": return "Halal"
+        if v == "yes":   return "Yes"
+        return ""
     return str(value) if value is not None else ""
 
 
