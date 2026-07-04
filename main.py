@@ -370,8 +370,59 @@ def _feed_dict(i):
     return {"id": i.id, "type": i.type, "emoji": i.emoji,
             "ru": i.ru, "en": i.en, "unread": i.unread, "created_at": i.created_at}
 
+def _check_birthdays(db: Session):
+    """Auto-create birthday feed items for children whose birthday is today."""
+    today = datetime.now().date()
+    today_prefix = today.strftime("%Y-%m-%dT")
+    today_dm = (today.day, today.month)
+    try:
+        children = sheets_client.get_children()
+    except Exception:
+        return
+    for kid in children:
+        dob = (kid.get("dob") or "").strip()
+        if not dob:
+            continue
+        parts = dob.split(".")
+        if len(parts) != 3:
+            continue
+        try:
+            d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        if (d, m) != today_dm:
+            continue
+        age = today.year - y
+        name = kid.get("id", "")
+        first = name.split()[0] if name else name
+        already = db.query(models.FeedItem).filter(
+            models.FeedItem.type == "birthday",
+            models.FeedItem.ru.contains(first),
+            models.FeedItem.created_at.startswith(today_prefix),
+        ).first()
+        if already:
+            continue
+        n = age % 10
+        h = age % 100
+        if n == 1 and h != 11:
+            age_ru = f"{age} год"
+        elif 2 <= n <= 4 and not 11 <= h <= 14:
+            age_ru = f"{age} года"
+        else:
+            age_ru = f"{age} лет"
+        item = models.FeedItem(
+            type="birthday", emoji="🎂",
+            ru=f"Сегодня день рождения у {first} — {age_ru}! 🎉",
+            en=f"It's {first}'s birthday today — {age} year{'s' if age != 1 else ''} old! 🎉",
+            unread=True,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        db.add(item)
+    db.commit()
+
 @app.get("/feed")
 def get_feed(db: Session = Depends(get_db)):
+    _check_birthdays(db)
     items = db.query(models.FeedItem).order_by(models.FeedItem.id.desc()).all()
     return [_feed_dict(i) for i in items]
 
