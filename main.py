@@ -194,7 +194,7 @@ class ChildEmojiIn(BaseModel):
     emoji: str
 
 class ChildDataIn(BaseModel):
-    firstName:    str
+    firstName:    str = ""
     lastName:     str = ""
     group:        str = "big"
     birthday:     str = ""
@@ -216,6 +216,7 @@ class ChildDataIn(BaseModel):
     parent2Name:  str = ""
     parent2Phone: str = ""
     address:      str = ""
+    status:       str = ""
 
 @app.post("/children")
 def create_child(data: ChildDataIn):
@@ -224,7 +225,8 @@ def create_child(data: ChildDataIn):
 
 @app.put("/children/{child_id}")
 def update_child_data(child_id: str, data: ChildDataIn):
-    sheets_client.update_child(child_id, data.dict())
+    # exclude_unset=True — only update fields explicitly sent in the request
+    sheets_client.update_child(child_id, data.dict(exclude_unset=True))
     return {"ok": True}
 
 @app.delete("/children/{child_id}")
