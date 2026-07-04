@@ -98,6 +98,8 @@ def compute_rate(full_name: str, attendance_rows: list[dict]) -> int:
             continue
         if d < cutoff:
             continue
+        if d.weekday() >= 5:  # skip Saturday (5) and Sunday (6)
+            continue
         total += 1
         if row.get("Status", "").strip().lower() == "present":
             present += 1
