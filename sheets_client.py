@@ -139,8 +139,10 @@ def get_children() -> list[dict]:
             continue
         full_name = f"{first} {last}".strip()
 
+        status_raw = (row.get("Status") or "").strip().lower()
         meals_raw = (row.get("Meals included") or "").strip().lower()
         extra = {
+            "active": status_raw != "inactive",
             "address": (row.get("Address") or "").strip(),
             "deposit": (row.get("Deposit") or "").strip(),
             "mealsIncluded": meals_raw in ("yes", "halal"),
@@ -461,6 +463,7 @@ _CHILD_FIELD_MAP = {
     "afterSchool":   "After school",
     "deposit":        "Deposit",
     "paidUntil":      "Paid until",
+    "status":         "Status",
     "parent1Name":   "Parent name (1)",
     "parent1Phone":  "Parent contact (1)",
     "parent2Name":   "Parent name (2)",
@@ -486,6 +489,8 @@ def _cell_val(field: str, value) -> str:
         return ""
     if field == "paidUntil":
         return _to_dmy(str(value)) if value else ""
+    if field == "status":
+        return "Inactive" if str(value).strip().lower() == "inactive" else "Active"
     return str(value) if value is not None else ""
 
 
