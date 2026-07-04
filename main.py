@@ -398,6 +398,7 @@ def _check_birthdays(db: Session):
         already = db.query(models.FeedItem).filter(
             models.FeedItem.type == "birthday",
             models.FeedItem.ru.contains(first),
+            models.FeedItem.en.contains(name if name else first),
             models.FeedItem.created_at.startswith(today_prefix),
         ).first()
         if already:
@@ -413,7 +414,7 @@ def _check_birthdays(db: Session):
         item = models.FeedItem(
             type="birthday", emoji="🎂",
             ru=f"Сегодня день рождения у {first} — {age_ru}! 🎉",
-            en=f"It's {first}'s birthday today — {age} year{'s' if age != 1 else ''} old! 🎉",
+            en=f"It's {name}'s birthday today — {age} year{'s' if age != 1 else ''} old! 🎉",
             unread=True,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
