@@ -285,7 +285,7 @@ def get_clubs(db: Session = Depends(get_db)):
     result = []
     for c in clubs:
         sheet = price_map.get(c.name_ru, {})
-        d = _club_dict(c, kids_by_club.get(c.name_ru, []))
+        d = _club_dict(c, kids_by_club.get(c.name_en, []))
         if sheet.get("price") is not None:
             d["price"] = sheet["price"]
         if sheet.get("days"):
@@ -307,7 +307,7 @@ def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
     club = db.query(models.Club).filter_by(id=club_id).first()
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
-    sheets_client.add_child_club(child_id, club.name_ru)
+    sheets_client.add_child_club(child_id, club.name_en)
     return {"ok": True}
 
 @app.delete("/clubs/{club_id}/members/{child_id}")
@@ -315,7 +315,7 @@ def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db
     club = db.query(models.Club).filter_by(id=club_id).first()
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
-    sheets_client.remove_child_club(child_id, club.name_ru)
+    sheets_client.remove_child_club(child_id, club.name_en)
     return {"ok": True}
 
 @app.get("/club-attendance/{club_id}/{date}")
