@@ -41,6 +41,13 @@ class ClubPayment(Base):
     kid_id  = Column(String)    # "First Last"
     paid    = Column(Boolean, default=False)
 
+class ClubScheduleCache(Base):
+    """Local mirror of the (separate) Clubs sheet's price/days/time — same
+    idea as ChildCache, just for the other Sheets tab /clubs merges in."""
+    __tablename__ = "club_schedule_cache"
+    id   = Column(Integer, primary_key=True)  # always 1 — single row holding the whole list
+    data = Column(String)  # JSON list, same shape get_clubs_from_sheets() returns
+
 class ChildCache(Base):
     """Local mirror of Sheets' Children data — refreshed from Sheets on a
     background timer and right after every app-side write, so /children and

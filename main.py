@@ -44,6 +44,24 @@ def _refresh_children_cache() -> None:
 def _cached_children(db: Session) -> list[dict]:
     return [json.loads(row.data) for row in db.query(models.ChildCache).all()]
 
+def _refresh_club_schedule_cache() -> None:
+    clubs = sheets_client.get_clubs_from_sheets()
+    db = SessionLocal()
+    try:
+        row = db.query(models.ClubScheduleCache).filter_by(id=1).first()
+        payload = json.dumps(clubs)
+        if row:
+            row.data = payload
+        else:
+            db.add(models.ClubScheduleCache(id=1, data=payload))
+        db.commit()
+    finally:
+        db.close()
+
+def _cached_club_schedule(db: Session) -> list[dict]:
+    row = db.query(models.ClubScheduleCache).filter_by(id=1).first()
+    return json.loads(row.data) if row else []
+
 def _children_cache_refresh_loop() -> None:
     while True:
         time.sleep(CHILDREN_CACHE_REFRESH_SECONDS)
@@ -51,6 +69,10 @@ def _children_cache_refresh_loop() -> None:
             _refresh_children_cache()
         except Exception:
             pass  # Sheets hiccup — next cycle will retry; stale cache beats a crashed thread
+        try:
+            _refresh_club_schedule_cache()
+        except Exception:
+            pass
 
 def _migrate():
     inspector = inspect(engine)
@@ -88,6 +110,10 @@ try:
     _refresh_children_cache()  # populate before the first request lands
 except Exception:
     pass  # Sheets unreachable at boot — background loop will retry
+try:
+    _refresh_club_schedule_cache()
+except Exception:
+    pass
 threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 
 app = FastAPI()
@@ -313,12 +339,8 @@ def _club_dict(c, kids):
 @app.get("/clubs")
 def get_clubs(db: Session = Depends(get_db)):
     clubs = db.query(models.Club).all()
-    # Merge prices and schedule from Sheets (Olga edits there)
-    try:
-        sheet_clubs = sheets_client.get_clubs_from_sheets()
-        price_map = {s["name_ru"]: s for s in sheet_clubs}
-    except Exception:
-        price_map = {}
+    # Merge prices and schedule from the (cached) Clubs sheet (Olga edits there)
+    price_map = {s["name_ru"]: s for s in _cached_club_schedule(db)}
 
     # Membership itself comes from the (cached) Children data's "clubs" field —
     # Sheets is still the real source, this is just the fast local mirror of it.
