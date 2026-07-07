@@ -640,7 +640,7 @@ def get_staff() -> list[dict]:
         ws = sh.worksheet("Staff")
     except gspread.WorksheetNotFound:
         return []
-    rows = ws.get_all_records()
+    rows = _rows_as_dicts(ws.get_all_values())
     result = []
     for r in rows:
         name = str(r.get("Name", "")).strip()
