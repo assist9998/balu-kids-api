@@ -1,4 +1,7 @@
+import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -11,6 +14,43 @@ from pydantic import BaseModel
 from database import engine, get_db, Base, SessionLocal
 import models
 import sheets_client
+
+CHILDREN_CACHE_REFRESH_SECONDS = 15
+
+def _refresh_children_cache() -> None:
+    """Pull Children straight from Sheets and mirror into children_cache —
+    this is what picks up Ольга's direct edits (prices, paidUntil, clubs, ...)
+    on the next cycle, since app reads/writes go through the cache, not Sheets."""
+    children = sheets_client.get_children()
+    now = datetime.now(timezone.utc).isoformat()
+    db = SessionLocal()
+    try:
+        seen_ids = set()
+        for c in children:
+            seen_ids.add(c["id"])
+            row = db.query(models.ChildCache).filter_by(id=c["id"]).first()
+            payload = json.dumps(c)
+            if row:
+                row.data, row.updated_at = payload, now
+            else:
+                db.add(models.ChildCache(id=c["id"], data=payload, updated_at=now))
+        for row in db.query(models.ChildCache).all():
+            if row.id not in seen_ids:
+                db.delete(row)
+        db.commit()
+    finally:
+        db.close()
+
+def _cached_children(db: Session) -> list[dict]:
+    return [json.loads(row.data) for row in db.query(models.ChildCache).all()]
+
+def _children_cache_refresh_loop() -> None:
+    while True:
+        time.sleep(CHILDREN_CACHE_REFRESH_SECONDS)
+        try:
+            _refresh_children_cache()
+        except Exception:
+            pass  # Sheets hiccup — next cycle will retry; stale cache beats a crashed thread
 
 def _migrate():
     inspector = inspect(engine)
@@ -43,6 +83,12 @@ try:
     _seed_clubs(_db)
 finally:
     _db.close()
+
+try:
+    _refresh_children_cache()  # populate before the first request lands
+except Exception:
+    pass  # Sheets unreachable at boot — background loop will retry
+threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 
 app = FastAPI()
 
@@ -183,7 +229,7 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
 
 @app.get("/children")
 def get_children(db: Session = Depends(get_db)):
-    children = sheets_client.get_children()
+    children = _cached_children(db)
     avatars = {a.child_id: a.emoji for a in db.query(models.ChildAvatar).all()}
     for c in children:
         if c["id"] in avatars:
@@ -221,12 +267,14 @@ class ChildDataIn(BaseModel):
 @app.post("/children")
 def create_child(data: ChildDataIn):
     new_id = sheets_client.add_child(data.dict())
+    _refresh_children_cache()
     return {"ok": True, "id": new_id}
 
 @app.put("/children/{child_id}")
 def update_child_data(child_id: str, data: ChildDataIn):
     # exclude_unset=True — only update fields explicitly sent in the request
     sheets_client.update_child(child_id, data.dict(exclude_unset=True))
+    _refresh_children_cache()
     return {"ok": True}
 
 @app.delete("/children/{child_id}")
@@ -235,6 +283,7 @@ def delete_child_route(child_id: str):
         sheets_client.delete_child(child_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    _refresh_children_cache()
     return {"ok": True}
 
 @app.put("/children/{child_id}/emoji")
@@ -271,16 +320,12 @@ def get_clubs(db: Session = Depends(get_db)):
     except Exception:
         price_map = {}
 
-    # Membership itself comes straight from the Children sheet's "Clubs" column —
-    # that's the source of truth, so edits made directly in Sheets show up here too.
-    try:
-        children_clubs = sheets_client.get_all_children_clubs()
-    except Exception:
-        children_clubs = {}
+    # Membership itself comes from the (cached) Children data's "clubs" field —
+    # Sheets is still the real source, this is just the fast local mirror of it.
     kids_by_club = {}
-    for child_name, names in children_clubs.items():
-        for name in names:
-            kids_by_club.setdefault(name, []).append(child_name)
+    for c in _cached_children(db):
+        for name in sheets_client.split_club_names(c["clubs"]):
+            kids_by_club.setdefault(name, []).append(c["id"])
 
     result = []
     for c in clubs:
@@ -308,6 +353,7 @@ def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     sheets_client.add_child_club(child_id, club.name_en)
+    _refresh_children_cache()
     return {"ok": True}
 
 @app.delete("/clubs/{club_id}/members/{child_id}")
@@ -316,6 +362,7 @@ def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     sheets_client.remove_child_club(child_id, club.name_en)
+    _refresh_children_cache()
     return {"ok": True}
 
 @app.get("/club-attendance/{club_id}/{date}")

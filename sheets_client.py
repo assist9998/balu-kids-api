@@ -497,7 +497,7 @@ def _cell_val(field: str, value) -> str:
     return str(value) if value is not None else ""
 
 
-def _split_club_names(raw: str) -> list[str]:
+def split_club_names(raw: str) -> list[str]:
     """Accept both "Chess + Swimming" (what the app writes) and "Chess, Swimming"
     (what Ольга might type by hand) as the same list."""
     return [c.strip() for c in re.split(r"[+,]", raw) if c.strip()]
@@ -518,7 +518,7 @@ def get_all_children_clubs() -> dict[str, list[str]]:
     Ольга editing the Clubs column directly end up reading/writing the same cell.
     Goes through get_children()'s cache instead of its own sheet fetch, so this
     no longer adds an extra full-sheet read to every /clubs call."""
-    return {c["id"]: _split_club_names(c["clubs"]) for c in get_children()}
+    return {c["id"]: split_club_names(c["clubs"]) for c in get_children()}
 
 
 def get_child_clubs(child_id: str) -> list[str]:

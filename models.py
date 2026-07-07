@@ -41,6 +41,15 @@ class ClubPayment(Base):
     kid_id  = Column(String)    # "First Last"
     paid    = Column(Boolean, default=False)
 
+class ChildCache(Base):
+    """Local mirror of Sheets' Children data — refreshed from Sheets on a
+    background timer and right after every app-side write, so /children and
+    /clubs answer instantly instead of hitting the Sheets API per request."""
+    __tablename__ = "children_cache"
+    id         = Column(String, primary_key=True)  # "First Last"
+    data       = Column(String)  # JSON-encoded child dict, same shape get_children() returns
+    updated_at = Column(String)
+
 class ChildAvatar(Base):
     __tablename__ = "child_avatars"
     child_id = Column(String, primary_key=True)
