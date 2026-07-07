@@ -41,6 +41,12 @@ def _refresh_children_cache() -> None:
     finally:
         db.close()
 
+def _refresh_children_cache_async() -> None:
+    """Same as _refresh_children_cache(), but doesn't make the caller wait —
+    write endpoints call this so the response comes back right after the
+    Sheets write, instead of also blocking on a full re-fetch of Sheets."""
+    threading.Thread(target=_refresh_children_cache, daemon=True).start()
+
 def _cached_children(db: Session) -> list[dict]:
     return [json.loads(row.data) for row in db.query(models.ChildCache).all()]
 
@@ -293,14 +299,14 @@ class ChildDataIn(BaseModel):
 @app.post("/children")
 def create_child(data: ChildDataIn):
     new_id = sheets_client.add_child(data.dict())
-    _refresh_children_cache()
+    _refresh_children_cache_async()
     return {"ok": True, "id": new_id}
 
 @app.put("/children/{child_id}")
 def update_child_data(child_id: str, data: ChildDataIn):
     # exclude_unset=True — only update fields explicitly sent in the request
     sheets_client.update_child(child_id, data.dict(exclude_unset=True))
-    _refresh_children_cache()
+    _refresh_children_cache_async()
     return {"ok": True}
 
 @app.delete("/children/{child_id}")
@@ -309,7 +315,7 @@ def delete_child_route(child_id: str):
         sheets_client.delete_child(child_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    _refresh_children_cache()
+    _refresh_children_cache_async()
     return {"ok": True}
 
 @app.put("/children/{child_id}/emoji")
@@ -375,7 +381,7 @@ def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     sheets_client.add_child_club(child_id, club.name_en)
-    _refresh_children_cache()
+    _refresh_children_cache_async()
     return {"ok": True}
 
 @app.delete("/clubs/{club_id}/members/{child_id}")
@@ -384,7 +390,7 @@ def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     sheets_client.remove_child_club(child_id, club.name_en)
-    _refresh_children_cache()
+    _refresh_children_cache_async()
     return {"ok": True}
 
 @app.get("/club-attendance/{club_id}/{date}")
