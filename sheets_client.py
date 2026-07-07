@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -494,6 +495,72 @@ def _cell_val(field: str, value) -> str:
     if field == "status":
         return "Inactive" if str(value).strip().lower() == "inactive" else "Active"
     return str(value) if value is not None else ""
+
+
+def _split_club_names(raw: str) -> list[str]:
+    """Accept both "Chess + Swimming" (what the app writes) and "Chess, Swimming"
+    (what Ольга might type by hand) as the same list."""
+    return [c.strip() for c in re.split(r"[+,]", raw) if c.strip()]
+
+
+def _children_clubs_columns(ws):
+    values = ws.get_all_values()
+    if not values:
+        return None, None, None, None, None
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    return values, col.get("First name"), col.get("Last name"), col.get("Clubs"), col
+
+
+def get_all_children_clubs() -> dict[str, list[str]]:
+    """child full name -> list of club names, straight from the Children sheet's
+    'Clubs' column — this is the single source of truth for club membership,
+    both the app and Ольга editing the sheet directly read/write the same cell."""
+    sh = _sheet()
+    ws = sh.worksheet("Children")
+    values, first_i, last_i, clubs_i, _ = _children_clubs_columns(ws)
+    if not values or clubs_i is None:
+        return {}
+    result = {}
+    for row in values[1:]:
+        first = row[first_i] if first_i is not None and first_i < len(row) else ""
+        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
+        name = f"{first} {last}".strip()
+        if not name:
+            continue
+        raw = row[clubs_i] if clubs_i < len(row) else ""
+        result[name] = _split_club_names(raw)
+    return result
+
+
+def get_child_clubs(child_id: str) -> list[str]:
+    return get_all_children_clubs().get(child_id, [])
+
+
+def _write_child_clubs(child_id: str, club_names: list[str]) -> None:
+    sh = _sheet()
+    ws = sh.worksheet("Children")
+    values, first_i, last_i, clubs_i, _ = _children_clubs_columns(ws)
+    if not values or clubs_i is None:
+        return
+    for i, row in enumerate(values[1:], start=2):
+        first = row[first_i] if first_i is not None and first_i < len(row) else ""
+        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
+        if f"{first} {last}".strip() == child_id:
+            ws.update_cell(i, clubs_i + 1, " + ".join(club_names))
+            return
+
+
+def add_child_club(child_id: str, club_name: str) -> None:
+    names = get_child_clubs(child_id)
+    if club_name not in names:
+        names.append(club_name)
+        _write_child_clubs(child_id, sorted(names))
+
+
+def remove_child_club(child_id: str, club_name: str) -> None:
+    names = [n for n in get_child_clubs(child_id) if n != club_name]
+    _write_child_clubs(child_id, names)
 
 
 def update_child(old_id: str, data: dict) -> None:

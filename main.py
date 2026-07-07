@@ -255,12 +255,11 @@ def get_groups(db: Session = Depends(get_db)):
 
 # ── Clubs ─────────────────────────────────────────────────────────────────────
 
-def _club_dict(c, price_override=None):
+def _club_dict(c, kids):
     return {"id": c.id, "name_ru": c.name_ru, "name_en": c.name_en,
             "emoji": c.emoji, "color": c.color, "ink": c.ink,
             "days_ru": c.days_ru, "days_en": c.days_en, "time": c.time,
-            "price": price_override if price_override is not None else c.price,
-            "kids": [m.child_id for m in c.members]}
+            "price": c.price, "kids": kids}
 
 @app.get("/clubs")
 def get_clubs(db: Session = Depends(get_db)):
@@ -272,10 +271,21 @@ def get_clubs(db: Session = Depends(get_db)):
     except Exception:
         price_map = {}
 
+    # Membership itself comes straight from the Children sheet's "Clubs" column —
+    # that's the source of truth, so edits made directly in Sheets show up here too.
+    try:
+        children_clubs = sheets_client.get_all_children_clubs()
+    except Exception:
+        children_clubs = {}
+    kids_by_club = {}
+    for child_name, names in children_clubs.items():
+        for name in names:
+            kids_by_club.setdefault(name, []).append(child_name)
+
     result = []
     for c in clubs:
         sheet = price_map.get(c.name_ru, {})
-        d = _club_dict(c)
+        d = _club_dict(c, kids_by_club.get(c.name_ru, []))
         if sheet.get("price") is not None:
             d["price"] = sheet["price"]
         if sheet.get("days"):
@@ -294,20 +304,18 @@ def get_clubs(db: Session = Depends(get_db)):
 
 @app.post("/clubs/{club_id}/members/{child_id}")
 def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
-    if not db.query(models.Club).filter_by(id=club_id).first():
+    club = db.query(models.Club).filter_by(id=club_id).first()
+    if not club:
         raise HTTPException(status_code=404, detail="Club not found")
-    existing = db.query(models.ClubMember).filter_by(club_id=club_id, child_id=child_id).first()
-    if not existing:
-        db.add(models.ClubMember(club_id=club_id, child_id=child_id))
-        db.commit()
+    sheets_client.add_child_club(child_id, club.name_ru)
     return {"ok": True}
 
 @app.delete("/clubs/{club_id}/members/{child_id}")
 def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
-    row = db.query(models.ClubMember).filter_by(club_id=club_id, child_id=child_id).first()
-    if row:
-        db.delete(row)
-        db.commit()
+    club = db.query(models.Club).filter_by(id=club_id).first()
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    sheets_client.remove_child_club(child_id, club.name_ru)
     return {"ok": True}
 
 @app.get("/club-attendance/{club_id}/{date}")

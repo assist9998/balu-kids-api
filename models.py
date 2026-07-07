@@ -1,5 +1,4 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
-from sqlalchemy.orm import relationship
 from database import Base
 
 class Group(Base):
@@ -23,13 +22,8 @@ class Club(Base):
     days_en = Column(String)
     time    = Column(String)
     price   = Column(Integer, nullable=True)
-    members = relationship("ClubMember", back_populates="club", cascade="all, delete-orphan")
-
-class ClubMember(Base):
-    __tablename__ = "club_members"
-    club_id  = Column(Integer, ForeignKey("clubs.id"), primary_key=True)
-    child_id = Column(String, primary_key=True)  # "First Last" from Sheets
-    club     = relationship("Club", back_populates="members")
+    # Membership itself lives in the Children sheet's "Clubs" column (see sheets_client),
+    # not here — that's the single source of truth for who's in which club.
 
 class ClubAttendance(Base):
     __tablename__ = "club_attendance"
