@@ -513,24 +513,12 @@ def _children_clubs_columns(ws):
 
 
 def get_all_children_clubs() -> dict[str, list[str]]:
-    """child full name -> list of club names, straight from the Children sheet's
-    'Clubs' column — this is the single source of truth for club membership,
-    both the app and Ольга editing the sheet directly read/write the same cell."""
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values, first_i, last_i, clubs_i, _ = _children_clubs_columns(ws)
-    if not values or clubs_i is None:
-        return {}
-    result = {}
-    for row in values[1:]:
-        first = row[first_i] if first_i is not None and first_i < len(row) else ""
-        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
-        name = f"{first} {last}".strip()
-        if not name:
-            continue
-        raw = row[clubs_i] if clubs_i < len(row) else ""
-        result[name] = _split_club_names(raw)
-    return result
+    """child full name -> list of club names, from the (cached) Children data —
+    this is the single source of truth for club membership, both the app and
+    Ольга editing the Clubs column directly end up reading/writing the same cell.
+    Goes through get_children()'s cache instead of its own sheet fetch, so this
+    no longer adds an extra full-sheet read to every /clubs call."""
+    return {c["id"]: _split_club_names(c["clubs"]) for c in get_children()}
 
 
 def get_child_clubs(child_id: str) -> list[str]:
@@ -548,6 +536,7 @@ def _write_child_clubs(child_id: str, club_names: list[str]) -> None:
         last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
         if f"{first} {last}".strip() == child_id:
             ws.update_cell(i, clubs_i + 1, " + ".join(club_names))
+            _cache["at"] = 0  # so the next get_children()/get_all_children_clubs() sees this write
             return
 
 
