@@ -560,9 +560,16 @@ class ClubPaymentsIn(BaseModel):
 
 @app.post("/club-payments")
 def save_club_payments(data: ClubPaymentsIn, db: Session = Depends(get_db)):
-    db.query(models.ClubPayment).filter_by(month=data.month, club_id=data.club_id).delete()
+    # Upsert only the kids in this payload — a wholesale delete-then-recreate
+    # meant a partial save from one session would wipe every other kid's
+    # record for the month, since callers only send what they actually changed.
     for kid_id, paid in data.paid.items():
-        db.add(models.ClubPayment(month=data.month, club_id=data.club_id,
-                                   kid_id=str(kid_id), paid=paid))
+        row = db.query(models.ClubPayment).filter_by(
+            month=data.month, club_id=data.club_id, kid_id=str(kid_id)).first()
+        if row:
+            row.paid = paid
+        else:
+            db.add(models.ClubPayment(month=data.month, club_id=data.club_id,
+                                       kid_id=str(kid_id), paid=paid))
     db.commit()
     return {"ok": True}
