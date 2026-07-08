@@ -265,7 +265,20 @@ def upsert_attendance(date: str, statuses: dict) -> None:
 _MONTH_DAYS = {"jun": 30, "jul": 31, "aug": 31, "sep": 30}
 
 
-def _update_paid_until(sh, month: str, deltas: list) -> None:
+def _add_weekdays(start, n: int):
+    """Advance `start` by n Mon-Fri days, skipping Sat/Sun — tourists only
+    attend on weekdays, so "5 days paid" should land 5 weekdays later, not
+    just 5 calendar days later (which could silently swallow a weekend)."""
+    d = start
+    remaining = n
+    while remaining > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            remaining -= 1
+    return d
+
+
+def _update_paid_until(sh, month: str, deltas: list) -> dict:
     """Roll the "Paid until" date forward in Children, but only by however
     many days are genuinely *new* in this save (see upsert_payments, which
     computes each kid's delta against what was already on record before
@@ -292,7 +305,7 @@ def _update_paid_until(sh, month: str, deltas: list) -> None:
     first_i, last_i = col.get("First name"), col.get("Last name")
     contract_i, paiduntil_i = col.get("Contract type"), col.get("Paid until")
     if first_i is None or last_i is None or paiduntil_i is None:
-        return
+        return {}
 
     row_by_name = {}
     for i, row in enumerate(values[1:], start=2):
@@ -304,6 +317,7 @@ def _update_paid_until(sh, month: str, deltas: list) -> None:
 
     today = datetime.now().date()
     updates = []
+    new_dates = {}
     for d in deltas:
         row_i = row_by_name.get(d["kid_id"])
         if row_i is None:
@@ -318,15 +332,17 @@ def _update_paid_until(sh, month: str, deltas: list) -> None:
         cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
         cur_date = _parse_ymd(cur_raw) or today
         base = max(today, cur_date) if is_tourist else cur_date
-        new_date = base + timedelta(days=n_days)
+        new_date = _add_weekdays(base, n_days) if is_tourist else base + timedelta(days=n_days)
 
         updates.append({
             "range": gspread.utils.rowcol_to_a1(row_i, paiduntil_i + 1),
             "values": [[new_date.strftime("%d.%m.%Y")]],
         })
+        new_dates[d["kid_id"]] = new_date.strftime("%d.%m.%Y")
 
     if updates:
         ws.batch_update(updates)
+    return new_dates
 
 
 def get_payments(month: str) -> dict:
@@ -354,7 +370,7 @@ def get_payments(month: str) -> dict:
     return result
 
 
-def upsert_payments(month: str, rows: list) -> None:
+def upsert_payments(month: str, rows: list) -> dict:
     """Mirror garden payments into Ольга's Payments sheet
     (Month/Child/Group/Amount/Days/Paid/Payment date). Club columns are
     left alone — clubs aren't wired up to this yet."""
@@ -436,7 +452,7 @@ def upsert_payments(month: str, rows: list) -> None:
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
-    _update_paid_until(sh, month, deltas)
+    return _update_paid_until(sh, month, deltas)
 
 
 # ── Child CRUD ────────────────────────────────────────────────────────────────
@@ -503,13 +519,31 @@ def split_club_names(raw: str) -> list[str]:
     return [c.strip() for c in re.split(r"[+,]", raw) if c.strip()]
 
 
+_row_cache = {"data": None, "at": 0}
+_ROW_CACHE_TTL = 45  # matches _cache's TTL — reused across a burst of club add/removes
+
+
 def _children_clubs_columns(ws):
+    """Row/column lookup for writing the Clubs cell — cached, because Ольга
+    adding several kids to a club back-to-back was firing one uncached
+    get_all_values() per click and blowing through the Sheets API's
+    per-minute read quota (429s). Row *positions* only change when a child
+    is added/deleted, which invalidate this below — a stale Clubs *value*
+    in the cached snapshot doesn't matter since we only use it for name
+    lookup, not to read the current club list."""
+    now = time.time()
+    if _row_cache["data"] is not None and now - _row_cache["at"] < _ROW_CACHE_TTL:
+        return _row_cache["data"]
     values = ws.get_all_values()
     if not values:
-        return None, None, None, None, None
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    return values, col.get("First name"), col.get("Last name"), col.get("Clubs"), col
+        result = (None, None, None, None, None)
+    else:
+        headers = values[0]
+        col = {h: i for i, h in enumerate(headers)}
+        result = (values, col.get("First name"), col.get("Last name"), col.get("Clubs"), col)
+    _row_cache["data"] = result
+    _row_cache["at"] = now
+    return result
 
 
 def get_all_children_clubs() -> dict[str, list[str]]:
@@ -607,6 +641,7 @@ def add_child(data: dict) -> str:
 
     ws.append_rows([new_row], value_input_option="USER_ENTERED")
     _cache["at"] = 0
+    _row_cache["at"] = 0
 
     fn = str(data.get("firstName", "")).strip()
     ln = str(data.get("lastName", "")).strip()
@@ -628,6 +663,7 @@ def delete_child(child_id: str) -> None:
         if f"{first} {last}".strip() == child_id:
             ws.delete_rows(i)
             _cache["at"] = 0
+            _row_cache["at"] = 0  # deleting a row shifts every row after it
             return
     raise ValueError(f"Child not found: {child_id}")
 
