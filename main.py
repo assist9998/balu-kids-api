@@ -288,6 +288,7 @@ class ChildDataIn(BaseModel):
     napTime:      bool = False
     afterSchool:  bool = False
     deposit:      str = ""
+    paidFrom:     str = ""
     paidUntil:    str = ""
     parent1Name:  str = ""
     parent1Phone: str = ""
@@ -452,9 +453,8 @@ class PaymentsIn(BaseModel):
 
 @app.post("/payments")
 def save_payments(data: PaymentsIn):
-    new_paid_until = sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
-    _refresh_children_cache_async()  # Paid until just moved — don't leave /children stale until the next cycle
-    return {"ok": True, "paidUntil": new_paid_until}
+    sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
+    return {"ok": True}
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
 

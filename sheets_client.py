@@ -52,19 +52,6 @@ def _to_dmy(s: str) -> str:
     return s.replace("-", ".")
 
 
-def _parse_ymd(s: str):
-    """Parse DD.MM.YYYY or YYYY-MM-DD or YYYY.MM.DD → date object, or None."""
-    s = (s or "").strip()
-    try:
-        return datetime.strptime(s, "%d.%m.%Y").date()
-    except ValueError:
-        pass
-    try:
-        return datetime.strptime(s.replace(".", "-"), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
 def _yn(value: str) -> bool:
     return (value or "").strip().lower() == "yes"
 
@@ -165,6 +152,7 @@ def get_children() -> list[dict]:
             "dayType": (row.get("Day type") or "").strip(),
             "price": (row.get("Price") or "").strip(),
             "paidUntil": _to_dmy((row.get("Paid until") or "").strip()),
+            "paidFrom": _to_dmy((row.get("Paid from") or "").strip()),
         }
 
         children.append({
@@ -269,89 +257,6 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
 
-_MONTH_DAYS = {"jun": 30, "jul": 31, "aug": 31, "sep": 30}
-
-
-def _add_weekdays(start, n: int):
-    """Advance `start` by n Mon-Fri days, skipping Sat/Sun — tourists only
-    attend on weekdays, so "5 days paid" should land 5 weekdays later, not
-    just 5 calendar days later (which could silently swallow a weekend)."""
-    d = start
-    remaining = n
-    while remaining > 0:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
-            remaining -= 1
-    return d
-
-
-def _update_paid_until(sh, month: str, deltas: list) -> dict:
-    """Roll the "Paid until" date forward in Children, but only by however
-    many days are genuinely *new* in this save (see upsert_payments, which
-    computes each kid's delta against what was already on record before
-    calling this) — re-saving an unchanged "Paid" checkbox must not add
-    days again, or every idle re-save would push the date further out.
-
-    Tourists only attend days they've prepaid, so a late top-up starts
-    counting from today (max(today, old_date) + new_days) — unpaid time
-    just meant the kid wasn't there.
-
-    Long-term kids buy a whole calendar month in one go — the number of
-    days added is however many days are in the month tab being paid for
-    (30/31), not a flat 30, so paying tab-by-tab lines "Paid until" up
-    with real month boundaries instead of drifting. A late payment still
-    settles a debt rather than buying fresh days: it always adds onto the
-    *old* date, even if that's still in the past — that surfaces as
-    still-overdue if more than one cycle is owed."""
-    ws = sh.worksheet("Children")
-    values = ws.get_all_values()
-    if not values:
-        return
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    first_i, last_i = col.get("First name"), col.get("Last name")
-    contract_i, paiduntil_i = col.get("Contract type"), col.get("Paid until")
-    if first_i is None or last_i is None or paiduntil_i is None:
-        return {}
-
-    row_by_name = {}
-    for i, row in enumerate(values[1:], start=2):
-        first = row[first_i] if first_i < len(row) else ""
-        last = row[last_i] if last_i < len(row) else ""
-        name = f"{first} {last}".strip()
-        if name:
-            row_by_name[name] = i
-
-    today = datetime.now().date()
-    updates = []
-    new_dates = {}
-    for d in deltas:
-        row_i = row_by_name.get(d["kid_id"])
-        if row_i is None:
-            continue
-        row_vals = values[row_i - 1]
-        contract_raw = row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else ""
-        is_tourist = _contract(contract_raw) == "tourist"
-        n_days = d["new_days"] if is_tourist else (_MONTH_DAYS.get(month, 30) if d["newly_paid"] else 0)
-        if n_days <= 0:
-            continue
-
-        cur_raw = (row_vals[paiduntil_i] if paiduntil_i < len(row_vals) else "").strip()
-        cur_date = _parse_ymd(cur_raw) or today
-        base = max(today, cur_date) if is_tourist else cur_date
-        new_date = _add_weekdays(base, n_days) if is_tourist else base + timedelta(days=n_days)
-
-        updates.append({
-            "range": gspread.utils.rowcol_to_a1(row_i, paiduntil_i + 1),
-            "values": [[new_date.strftime("%d.%m.%Y")]],
-        })
-        new_dates[d["kid_id"]] = new_date.strftime("%d.%m.%Y")
-
-    if updates:
-        ws.batch_update(updates)
-    return new_dates
-
-
 def get_payments(month: str) -> dict:
     """Read garden payment status straight from Ольга's Payments sheet, so
     that anything she edits or deletes there is what the app shows — the
@@ -377,10 +282,13 @@ def get_payments(month: str) -> dict:
     return result
 
 
-def upsert_payments(month: str, rows: list) -> dict:
+def upsert_payments(month: str, rows: list) -> None:
     """Mirror garden payments into Ольга's Payments sheet
-    (Month/Child/Group/Amount/Days/Paid/Payment date). Club columns are
-    left alone — clubs aren't wired up to this yet."""
+    (Month/Child/Group/Amount/Days/Paid/Payment date) — pure bookkeeping for
+    income tracking. Doesn't touch Children's "Paid until"/"Paid from"
+    anymore; the manager sets those explicitly (see update_child), so there's
+    no date math to get subtly wrong here. Club columns are left alone —
+    clubs aren't wired up to this yet."""
     sh = _sheet()
     ws = sh.worksheet("Payments")
     values = ws.get_all_values()
@@ -409,23 +317,14 @@ def upsert_payments(month: str, rows: list) -> dict:
             existing_row_for[c] = i
 
     today = datetime.now().strftime("%Y-%m-%d")
-    updates, appends, deltas = [], [], []
+    updates, appends = [], []
     for r in rows:
         name, paid, amount, days = r["kid_id"], r["paid"], r["amount"], r.get("days", 1)
         is_tourist = contracts.get(name) == "tourist"
         days_cell = days if is_tourist else ""  # "Days" only means anything for tourists
         paid_label = "Yes" if paid else "No"
-        old_days, was_paid = 0, False
         if name in existing_row_for:
             row_i = existing_row_for[name]
-            old_row = values[row_i - 1]
-            if days_i is not None and days_i < len(old_row):
-                try:
-                    old_days = int(old_row[days_i])
-                except ValueError:
-                    old_days = 0
-            if paid_i is not None and paid_i < len(old_row):
-                was_paid = old_row[paid_i].strip().lower() == "yes"
             if amount_i is not None:
                 updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
             if days_i is not None:
@@ -451,15 +350,10 @@ def upsert_payments(month: str, rows: list) -> dict:
                 new_row[pdate_i] = today
             appends.append(new_row)
 
-        if paid:
-            deltas.append({"kid_id": name, "new_days": max(0, days - old_days), "newly_paid": not was_paid})
-
     if updates:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
-
-    return _update_paid_until(sh, month, deltas)
 
 
 # ── Child CRUD ────────────────────────────────────────────────────────────────
@@ -488,6 +382,7 @@ _CHILD_FIELD_MAP = {
     "napTime":       "Nap time",
     "afterSchool":   "After school",
     "deposit":        "Deposit",
+    "paidFrom":       "Paid from",
     "paidUntil":      "Paid until",
     "status":         "Status",
     "parent1Name":   "Parent name (1)",
@@ -513,7 +408,7 @@ def _cell_val(field: str, value) -> str:
         if v == "halal": return "Halal"
         if v == "yes":   return "Yes"
         return ""
-    if field == "paidUntil":
+    if field in ("paidUntil", "paidFrom"):
         return _to_dmy(str(value)) if value else ""
     if field == "status":
         return "Inactive" if str(value).strip().lower() == "inactive" else "Active"
