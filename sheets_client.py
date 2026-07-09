@@ -79,8 +79,15 @@ def _group_id(raw: str) -> str:
     return GROUP_NAME_TO_ID.get((raw or "").strip().lower(), "big")
 
 
+_SHORT_TERM_LABELS = ("tourist", "short term", "short-term", "краткосрочный", "краткосрочные")
+
+
 def _contract(raw: str) -> str:
-    return "tourist" if (raw or "").strip().lower() == "tourist" else "longterm"
+    # "Tourist" is the old label — kept recognized alongside "Short term" (plus
+    # a hyphenated spelling and the Russian label the app itself shows, in
+    # case someone types what they see in the app straight into the sheet)
+    # so rows nobody's gotten around to renaming still read correctly.
+    return "tourist" if (raw or "").strip().lower() in _SHORT_TERM_LABELS else "longterm"
 
 
 def compute_rate(full_name: str, attendance_rows: list[dict]) -> int:
@@ -323,8 +330,8 @@ def _update_paid_until(sh, month: str, deltas: list) -> dict:
         if row_i is None:
             continue
         row_vals = values[row_i - 1]
-        contract = (row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else "").strip().lower()
-        is_tourist = contract == "tourist"
+        contract_raw = row_vals[contract_i] if contract_i is not None and contract_i < len(row_vals) else ""
+        is_tourist = _contract(contract_raw) == "tourist"
         n_days = d["new_days"] if is_tourist else (_MONTH_DAYS.get(month, 30) if d["newly_paid"] else 0)
         if n_days <= 0:
             continue
@@ -495,7 +502,7 @@ def _cell_val(field: str, value) -> str:
     if field == "group":
         return _GROUP_ID_TO_SHEET.get(str(value), str(value))
     if field == "contractType":
-        return "Tourist" if str(value) == "tourist" else "Long term"
+        return "Short term" if str(value) == "tourist" else "Long term"
     if isinstance(value, bool):
         return "Yes" if value else "No"
     if field in ("paracetamol", "photoConsent"):
