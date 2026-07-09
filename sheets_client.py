@@ -23,14 +23,30 @@ _cache = {"children": None, "at": 0}
 _CACHE_TTL = 45  # seconds
 
 
+_client_singleton = None
+_sheet_singleton = None
+
+
 def _client():
-    creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=_SCOPES)
-    return gspread.authorize(creds)
+    # Re-authorizing from scratch (~1.5s of API round-trips) on every single
+    # call was the dominant cost in any request touching more than one
+    # sheets_client function — e.g. add_payment_log_entry chains three of
+    # them and was taking 10+ seconds almost entirely on repeated auth.
+    # gspread's Client renews its own token internally, so this is safe to
+    # reuse for the life of the process.
+    global _client_singleton
+    if _client_singleton is None:
+        creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=_SCOPES)
+        _client_singleton = gspread.authorize(creds)
+    return _client_singleton
 
 
 def _sheet():
-    return _client().open_by_key(SPREADSHEET_ID)
+    global _sheet_singleton
+    if _sheet_singleton is None:
+        _sheet_singleton = _client().open_by_key(SPREADSHEET_ID)
+    return _sheet_singleton
 
 
 def avatar_for_name(name: str) -> str:
@@ -257,103 +273,147 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
 
-def get_payments(month: str) -> dict:
-    """Read garden payment status straight from Ольга's Payments sheet, so
-    that anything she edits or deletes there is what the app shows — the
-    sheet is the source of truth, not a local copy."""
-    sh = _sheet()
+def _parse_dmy(s: str):
     try:
-        ws = sh.worksheet("Payments")
-    except gspread.WorksheetNotFound:
-        return {}
-    result = {}
-    for row in _rows_as_dicts(ws.get_all_values()):
-        if (row.get("Month") or "").strip() != month:
+        return datetime.strptime((s or "").strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def _parse_log_values(values: list) -> list[dict]:
+    """Turn raw Payment log sheet rows into dicts, one shared parser so
+    get_payment_log and the write paths below don't each re-read the sheet
+    just to recompute the same thing from what they already fetched."""
+    if not values:
+        return []
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    child_i = col.get("Child")
+    if child_i is None:
+        return []
+    result = []
+    for i, row in enumerate(values[1:], start=2):
+        if child_i >= len(row) or not row[child_i].strip():
             continue
-        name = (row.get("Child") or "").strip()
-        if not name:
-            continue
-        paid = (row.get("Paid") or "").strip().lower() == "yes"
-        try:
-            days = int((row.get("Days") or "1").strip())
-        except ValueError:
-            days = 1
-        result[name] = {"paid": paid, "days": days}
+        def cell(name, _row=row):
+            idx = col.get(name)
+            return _row[idx].strip() if idx is not None and idx < len(_row) else ""
+        result.append({
+            "id": i, "child": row[child_i].strip(),
+            "tariff": cell("Tariff"), "from": cell("Paid from"), "until": cell("Paid until"),
+            "amount": cell("Amount"), "enteredDate": cell("Entered date"),
+        })
     return result
 
 
-def upsert_payments(month: str, rows: list) -> None:
-    """Mirror garden payments into Ольга's Payments sheet
-    (Month/Child/Group/Amount/Days/Paid/Payment date) — pure bookkeeping for
-    income tracking. Doesn't touch Children's "Paid until"/"Paid from"
-    anymore; the manager sets those explicitly (see update_child), so there's
-    no date math to get subtly wrong here. Club columns are left alone —
-    clubs aren't wired up to this yet."""
+def get_payment_log(kid_id: str) -> list[dict]:
+    """Every logged payment for one child — an append-only history, so
+    short-term kids' separate visits (with gaps between) each keep their
+    own row instead of collapsing into a single from/until pair."""
     sh = _sheet()
-    ws = sh.worksheet("Payments")
-    values = ws.get_all_values()
-    headers = values[0] if values else ["Month", "Child", "Group", "Amount", "Days", "Paid", "Payment date"]
+    values = sh.worksheet("Payment log").get_all_values()
+    return [{k: v for k, v in e.items() if k != "child"}
+            for e in _parse_log_values(values) if e["child"] == kid_id]
+
+
+def _best_coverage(entries: list[dict]) -> tuple:
+    """Pick whichever entry covers furthest into the future — that's the
+    single "current period" Children!Paid from/until caches for the
+    overdue badge. Individual gaps between short-term visits live only in
+    the log itself, not in this rolled-up pair."""
+    best, best_until = None, None
+    for e in entries:
+        until = _parse_dmy(e["until"])
+        if until and (best_until is None or until > best_until):
+            best, best_until = e, until
+    return (best["from"], best["until"]) if best else ("", "")
+
+
+def _find_child_row(children_values: list, kid_id: str):
+    """Row index + column map for one child, from an already-fetched
+    Children!get_all_values() — callers that also need Children data for
+    something else (group lookup, etc.) can fetch it once and pass it in
+    instead of each doing their own read."""
+    headers = children_values[0] if children_values else []
     col = {h: i for i, h in enumerate(headers)}
-    month_i, child_i, group_i, amount_i, days_i, paid_i, pdate_i = (
-        col.get("Month", 0), col.get("Child", 1), col.get("Group"),
-        col.get("Amount"), col.get("Days"), col.get("Paid"), col.get("Payment date"),
-    )
+    first_i, last_i = col.get("First name"), col.get("Last name")
+    for i, row in enumerate(children_values[1:], start=2):
+        first = row[first_i] if first_i is not None and first_i < len(row) else ""
+        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
+        if f"{first} {last}".strip() == kid_id:
+            return i, row, col
+    return None, None, col
 
-    groups, contracts = {}, {}
-    try:
-        for row in _rows_as_dicts(sh.worksheet("Children").get_all_values()):
-            name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
-            if name:
-                groups[name] = (row.get("Group") or "").strip()
-                contracts[name] = _contract(row.get("Contract type"))
-    except gspread.WorksheetNotFound:
-        pass
 
-    existing_row_for = {}
-    for i, row in enumerate(values[1:], start=2):
-        m = row[month_i] if month_i < len(row) else ""
-        c = row[child_i] if child_i < len(row) else ""
-        if m == month and c:
-            existing_row_for[c] = i
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    updates, appends = [], []
-    for r in rows:
-        name, paid, amount, days = r["kid_id"], r["paid"], r["amount"], r.get("days", 1)
-        is_tourist = contracts.get(name) == "tourist"
-        days_cell = days if is_tourist else ""  # "Days" only means anything for tourists
-        paid_label = "Yes" if paid else "No"
-        if name in existing_row_for:
-            row_i = existing_row_for[name]
-            if amount_i is not None:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, amount_i + 1), "values": [[amount]]})
-            if days_i is not None:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, days_i + 1), "values": [[days_cell]]})
-            if paid_i is not None:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, paid_i + 1), "values": [[paid_label]]})
-            if paid_i is not None and pdate_i is not None and paid:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_i, pdate_i + 1), "values": [[today]]})
-        else:
-            managed_width = max(month_i, child_i, group_i or 0, amount_i or 0, days_i or 0, paid_i or 0, pdate_i or 0) + 1
-            new_row = [""] * managed_width
-            new_row[month_i] = month
-            new_row[child_i] = name
-            if group_i is not None:
-                new_row[group_i] = groups.get(name, "")
-            if amount_i is not None:
-                new_row[amount_i] = amount
-            if days_i is not None:
-                new_row[days_i] = days_cell
-            if paid_i is not None:
-                new_row[paid_i] = paid_label
-            if pdate_i is not None and paid:
-                new_row[pdate_i] = today
-            appends.append(new_row)
-
+def _write_child_coverage(sh, children_values: list, kid_id: str, new_from: str, new_until: str) -> None:
+    row_i, row, col = _find_child_row(children_values, kid_id)
+    if row_i is None:
+        return
+    from_i, until_i = col.get("Paid from"), col.get("Paid until")
+    updates = []
+    if from_i is not None:
+        updates.append({"range": gspread.utils.rowcol_to_a1(row_i, from_i + 1), "values": [[new_from]]})
+    if until_i is not None:
+        updates.append({"range": gspread.utils.rowcol_to_a1(row_i, until_i + 1), "values": [[new_until]]})
     if updates:
-        ws.batch_update(updates)
-    if appends:
-        ws.append_rows(appends, value_input_option="USER_ENTERED")
+        sh.worksheet("Children").batch_update(updates)
+
+
+def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str) -> dict:
+    """Append one payment to the log — the manager types the amount they
+    actually received, rather than the app computing it, so a pricing bug
+    can't misstate what was collected. Returns the child's recomputed
+    current coverage."""
+    sh = _sheet()
+    ws = sh.worksheet("Payment log")
+    values = ws.get_all_values()
+    headers = values[0] if values else ["Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date"]
+    col = {h: i for i, h in enumerate(headers)}
+
+    children_values = sh.worksheet("Children").get_all_values()
+    _, child_row, ccol = _find_child_row(children_values, kid_id)
+    group_i = ccol.get("Group")
+    group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+
+    new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
+    width = max(col.values(), default=-1) + 1
+    new_row = [""] * width
+    for field, value in (
+        ("Child", kid_id), ("Group", group), ("Tariff", tariff),
+        ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
+        ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+    ):
+        if field in col:
+            new_row[col[field]] = value
+    ws.append_rows([new_row], value_input_option="USER_ENTERED")
+
+    existing = [e for e in _parse_log_values(values) if e["child"] == kid_id]
+    existing.append({"from": new_from_dmy, "until": new_until_dmy})
+    new_from, new_until = _best_coverage(existing)
+    _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+    return {"paidFrom": new_from, "paidUntil": new_until}
+
+
+def delete_payment_log_entry(row_id: int) -> dict:
+    """Remove one logged payment (a manager correcting a mistake) and
+    recompute the owning child's cached coverage from what's left."""
+    sh = _sheet()
+    ws = sh.worksheet("Payment log")
+    values = ws.get_all_values()
+    if row_id < 2 or row_id > len(values):
+        raise ValueError(f"Payment log row not found: {row_id}")
+    entries = _parse_log_values(values)
+    target = next((e for e in entries if e["id"] == row_id), None)
+    kid_id = target["child"] if target else ""
+    ws.delete_rows(row_id)
+    if not kid_id:
+        return {}
+
+    remaining = [e for e in entries if e["child"] == kid_id and e["id"] != row_id]
+    new_from, new_until = _best_coverage(remaining)
+    children_values = sh.worksheet("Children").get_all_values()
+    _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+    return {"paidFrom": new_from, "paidUntil": new_until}
 
 
 # ── Child CRUD ────────────────────────────────────────────────────────────────

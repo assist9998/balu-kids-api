@@ -440,26 +440,34 @@ def save_attendance(data: AttendanceIn):
     sheets_client.upsert_attendance(data.date, data.statuses)
     return {"ok": True}
 
-# ── Payments ──────────────────────────────────────────────────────────────────
+# ── Payment log ───────────────────────────────────────────────────────────────
 
-@app.get("/payments/{month}")
-def get_payments(month: str):
-    return sheets_client.get_payments(month)
+@app.get("/payment-log/{kid_id}")
+def get_payment_log(kid_id: str):
+    return sheets_client.get_payment_log(kid_id)
 
-class PaymentRow(BaseModel):
-    kid_id: str
-    paid:   bool
-    days:   int = 1
-    amount: float = 0
+class PaymentLogIn(BaseModel):
+    kidId:     str
+    tariff:    str
+    dateFrom:  str
+    dateUntil: str
+    amount:    str
 
-class PaymentsIn(BaseModel):
-    month: str
-    rows:  list[PaymentRow]
+@app.post("/payment-log")
+def add_payment_log_entry(data: PaymentLogIn):
+    coverage = sheets_client.add_payment_log_entry(
+        data.kidId, data.tariff, data.dateFrom, data.dateUntil, data.amount)
+    _refresh_children_cache_async()
+    return {"ok": True, **coverage}
 
-@app.post("/payments")
-def save_payments(data: PaymentsIn):
-    sheets_client.upsert_payments(data.month, [r.dict() for r in data.rows])
-    return {"ok": True}
+@app.delete("/payment-log/{row_id}")
+def delete_payment_log_entry(row_id: int):
+    try:
+        coverage = sheets_client.delete_payment_log_entry(row_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    _refresh_children_cache_async()
+    return {"ok": True, **coverage}
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
 
