@@ -150,19 +150,25 @@ app.add_middleware(CORSMiddleware,
 class LoginIn(BaseModel):
     password: str
 
+_STAFF_POSITION_ROLE = {"director": "director", "accounter": "staff", "accountant": "staff", "staff": "staff"}
+
 @app.post("/auth/login")
 def login(data: LoginIn):
+    # Individual Staff-sheet passwords first — a personal password should
+    # always win over the shared DIRECTOR_PASSWORD/STAFF_PASSWORD env vars,
+    # otherwise an accidental collision (e.g. a teacher's password happening
+    # to match STAFF_PASSWORD) silently logs them in under the wrong role.
+    try:
+        for s in sheets_client.get_staff():
+            if s["password"] and data.password == s["password"]:
+                role = _STAFF_POSITION_ROLE.get(s["position"].strip().lower(), "teacher")
+                return {"role": role} if role != "teacher" else {"role": "teacher", "name": s["name"]}
+    except Exception:
+        pass
     if data.password == os.environ.get("DIRECTOR_PASSWORD"):
         return {"role": "director"}
     if data.password == os.environ.get("STAFF_PASSWORD"):
         return {"role": "staff"}
-    # Check individual teacher passwords from Staff sheet
-    try:
-        for s in sheets_client.get_staff():
-            if s["password"] and data.password == s["password"]:
-                return {"role": "teacher", "name": s["name"]}
-    except Exception:
-        pass
     raise HTTPException(status_code=401, detail="Invalid password")
 
 # ── Staff ─────────────────────────────────────────────────────────────────────
