@@ -17,34 +17,44 @@ import sheets_client
 
 CHILDREN_CACHE_REFRESH_SECONDS = 15
 
+# Serializes every children_cache refresh — the periodic loop and a write
+# endpoint's own refresh both end up calling sheets_client.get_children(),
+# and without this lock two overlapping calls can race: whichever started
+# its Sheets read first can still finish *last* and overwrite the other's
+# (fresher) result with a pre-write snapshot, silently losing the write for
+# up to CHILDREN_CACHE_REFRESH_SECONDS. Serializing them fixes that while
+# keeping refreshes fire-and-forget from the caller's point of view.
+_children_cache_refresh_lock = threading.Lock()
+
 def _refresh_children_cache() -> None:
     """Pull Children straight from Sheets and mirror into children_cache —
     this is what picks up Ольга's direct edits (prices, paidUntil, clubs, ...)
     on the next cycle, since app reads/writes go through the cache, not Sheets."""
-    children = sheets_client.get_children()
-    now = datetime.now(timezone.utc).isoformat()
-    db = SessionLocal()
-    try:
-        seen_ids = set()
-        for c in children:
-            seen_ids.add(c["id"])
-            row = db.query(models.ChildCache).filter_by(id=c["id"]).first()
-            payload = json.dumps(c)
-            if row:
-                row.data, row.updated_at = payload, now
-            else:
-                db.add(models.ChildCache(id=c["id"], data=payload, updated_at=now))
-        for row in db.query(models.ChildCache).all():
-            if row.id not in seen_ids:
-                db.delete(row)
-        db.commit()
-    finally:
-        db.close()
+    with _children_cache_refresh_lock:
+        children = sheets_client.get_children()
+        now = datetime.now(timezone.utc).isoformat()
+        db = SessionLocal()
+        try:
+            seen_ids = set()
+            for c in children:
+                seen_ids.add(c["id"])
+                row = db.query(models.ChildCache).filter_by(id=c["id"]).first()
+                payload = json.dumps(c)
+                if row:
+                    row.data, row.updated_at = payload, now
+                else:
+                    db.add(models.ChildCache(id=c["id"], data=payload, updated_at=now))
+            for row in db.query(models.ChildCache).all():
+                if row.id not in seen_ids:
+                    db.delete(row)
+            db.commit()
+        finally:
+            db.close()
 
 def _refresh_children_cache_async() -> None:
     """Same as _refresh_children_cache(), but doesn't make the caller wait —
-    write endpoints call this so the response comes back right after the
-    Sheets write, instead of also blocking on a full re-fetch of Sheets."""
+    the lock inside it still serializes against the periodic loop, so this
+    stays correct, just not synchronous."""
     threading.Thread(target=_refresh_children_cache, daemon=True).start()
 
 def _cached_children(db: Session) -> list[dict]:
@@ -310,12 +320,7 @@ def create_child(data: ChildDataIn):
 def update_child_data(child_id: str, data: ChildDataIn):
     # exclude_unset=True — only update fields explicitly sent in the request
     sheets_client.update_child(child_id, data.dict(exclude_unset=True))
-    new_id = f"{data.firstName} {data.lastName}".strip()
-    if new_id and new_id != child_id:
-        # renamed — frontend reloads and looks up the *new* id, same as a new child
-        _refresh_children_cache()
-    else:
-        _refresh_children_cache_async()
+    _refresh_children_cache_async()
     return {"ok": True}
 
 @app.delete("/children/{child_id}")
