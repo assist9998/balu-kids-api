@@ -162,7 +162,7 @@ def login(data: LoginIn):
         for s in sheets_client.get_staff():
             if s["password"] and data.password == s["password"]:
                 role = _STAFF_POSITION_ROLE.get(s["position"].strip().lower(), "teacher")
-                return {"role": role} if role != "teacher" else {"role": "teacher", "name": s["name"]}
+                return {"role": role, "name": s["name"]}
     except Exception:
         pass
     if data.password == os.environ.get("DIRECTOR_PASSWORD"):
