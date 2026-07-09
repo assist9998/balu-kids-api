@@ -33,14 +33,6 @@ class ClubAttendance(Base):
     child_id = Column(String)   # "First Last"
     status   = Column(String, default="present")
 
-class ClubPayment(Base):
-    __tablename__ = "club_payments"
-    id      = Column(Integer, primary_key=True, autoincrement=True)
-    month   = Column(String)
-    club_id = Column(Integer, ForeignKey("clubs.id"))
-    kid_id  = Column(String)    # "First Last"
-    paid    = Column(Boolean, default=False)
-
 class ClubScheduleCache(Base):
     """Local mirror of the (separate) Clubs sheet's price/days/time — same
     idea as ChildCache, just for the other Sheets tab /clubs merges in."""

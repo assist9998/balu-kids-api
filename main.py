@@ -99,6 +99,11 @@ def _migrate():
             conn.execute(text("DROP TABLE IF EXISTS club_payments"))
             conn.execute(text("DROP TABLE IF EXISTS club_kids"))
             conn.commit()
+        # club_payments (month/paid checkbox) replaced by the Club payment
+        # log sheet — drop unconditionally now that nothing reads it.
+        if "club_payments" in tables:
+            conn.execute(text("DROP TABLE IF EXISTS club_payments"))
+            conn.commit()
     Base.metadata.create_all(bind=engine)
 
 def _seed_clubs(db: Session):
@@ -568,30 +573,35 @@ def delete_feed_item(item_id: int, db: Session = Depends(get_db)):
     db.delete(item); db.commit()
     return {"ok": True}
 
-# ── Club payments ─────────────────────────────────────────────────────────────
+# ── Club payment log ──────────────────────────────────────────────────────────
 
-@app.get("/club-payments/{month}/{club_id}")
-def get_club_payments(month: str, club_id: int, db: Session = Depends(get_db)):
-    rows = db.query(models.ClubPayment).filter_by(month=month, club_id=club_id).all()
-    return {r.kid_id: r.paid for r in rows}
+@app.get("/club-payment-log/{club_id}")
+def get_club_payment_log(club_id: int, db: Session = Depends(get_db)):
+    club = db.query(models.Club).filter_by(id=club_id).first()
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    return sheets_client.get_club_payment_log(club.name_en)
 
-class ClubPaymentsIn(BaseModel):
-    month:   str
-    club_id: int
-    paid:    dict  # {kid_id: bool}
+class ClubPaymentLogIn(BaseModel):
+    kidId:     str
+    clubId:    int
+    dateFrom:  str
+    dateUntil: str
+    amount:    str
 
-@app.post("/club-payments")
-def save_club_payments(data: ClubPaymentsIn, db: Session = Depends(get_db)):
-    # Upsert only the kids in this payload — a wholesale delete-then-recreate
-    # meant a partial save from one session would wipe every other kid's
-    # record for the month, since callers only send what they actually changed.
-    for kid_id, paid in data.paid.items():
-        row = db.query(models.ClubPayment).filter_by(
-            month=data.month, club_id=data.club_id, kid_id=str(kid_id)).first()
-        if row:
-            row.paid = paid
-        else:
-            db.add(models.ClubPayment(month=data.month, club_id=data.club_id,
-                                       kid_id=str(kid_id), paid=paid))
-    db.commit()
-    return {"ok": True}
+@app.post("/club-payment-log")
+def add_club_payment_log_entry(data: ClubPaymentLogIn, db: Session = Depends(get_db)):
+    club = db.query(models.Club).filter_by(id=data.clubId).first()
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    coverage = sheets_client.add_club_payment_log_entry(
+        data.kidId, club.name_en, data.dateFrom, data.dateUntil, data.amount)
+    return {"ok": True, **coverage}
+
+@app.delete("/club-payment-log/{row_id}")
+def delete_club_payment_log_entry(row_id: int):
+    try:
+        coverage = sheets_client.delete_club_payment_log_entry(row_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True, **coverage}

@@ -416,6 +416,97 @@ def delete_payment_log_entry(row_id: int) -> dict:
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
+def _parse_club_log_values(values: list) -> list[dict]:
+    """Same idea as _parse_log_values, plus a "club" field — a kid can be
+    in more than one club with a different paid-through date in each, so
+    entries need to be scoped by club as well as by child."""
+    if not values:
+        return []
+    headers = values[0]
+    col = {h: i for i, h in enumerate(headers)}
+    child_i = col.get("Child")
+    if child_i is None:
+        return []
+    result = []
+    for i, row in enumerate(values[1:], start=2):
+        if child_i >= len(row) or not row[child_i].strip():
+            continue
+        def cell(name, _row=row):
+            idx = col.get(name)
+            return _row[idx].strip() if idx is not None and idx < len(_row) else ""
+        result.append({
+            "id": i, "child": row[child_i].strip(), "club": cell("Club"),
+            "from": cell("Paid from"), "until": cell("Paid until"),
+            "amount": cell("Amount"), "enteredDate": cell("Entered date"),
+        })
+    return result
+
+
+def get_club_payment_log(club_name: str) -> list[dict]:
+    """Every logged payment for one club, across all its members — the
+    frontend fetches this once per club and derives each kid's own
+    paid-through date from it client-side, since nothing here is cached
+    on the Children sheet (a kid's other club may have a different date)."""
+    sh = _sheet()
+    values = sh.worksheet("Club payment log").get_all_values()
+    return [{k: v for k, v in e.items() if k != "club"}
+            for e in _parse_club_log_values(values) if e["club"] == club_name]
+
+
+def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str) -> dict:
+    """Append one club payment. Returns this kid's recomputed coverage for
+    *this* club only — never touches Children!Paid from/until, which is
+    the garden-only cache."""
+    sh = _sheet()
+    ws = sh.worksheet("Club payment log")
+    values = ws.get_all_values()
+    headers = values[0] if values else ["Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date"]
+    col = {h: i for i, h in enumerate(headers)}
+
+    children_values = sh.worksheet("Children").get_all_values()
+    _, child_row, ccol = _find_child_row(children_values, kid_id)
+    group_i = ccol.get("Group")
+    group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+
+    new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
+    width = max(col.values(), default=-1) + 1
+    new_row = [""] * width
+    for field, value in (
+        ("Child", kid_id), ("Group", group), ("Club", club_name),
+        ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
+        ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+    ):
+        if field in col:
+            new_row[col[field]] = value
+    ws.append_rows([new_row], value_input_option="USER_ENTERED")
+
+    existing = [e for e in _parse_club_log_values(values) if e["child"] == kid_id and e["club"] == club_name]
+    existing.append({"from": new_from_dmy, "until": new_until_dmy})
+    new_from, new_until = _best_coverage(existing)
+    return {"paidFrom": new_from, "paidUntil": new_until}
+
+
+def delete_club_payment_log_entry(row_id: int) -> dict:
+    """Remove one logged club payment and recompute that kid's coverage
+    for that same club from what's left."""
+    sh = _sheet()
+    ws = sh.worksheet("Club payment log")
+    values = ws.get_all_values()
+    if row_id < 2 or row_id > len(values):
+        raise ValueError(f"Club payment log row not found: {row_id}")
+    entries = _parse_club_log_values(values)
+    target = next((e for e in entries if e["id"] == row_id), None)
+    kid_id = target["child"] if target else ""
+    club_name = target["club"] if target else ""
+    ws.delete_rows(row_id)
+    if not kid_id:
+        return {}
+
+    remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name and e["id"] != row_id]
+    new_from, new_until = _best_coverage(remaining)
+    return {"paidFrom": new_from, "paidUntil": new_until}
+
+
 # ── Child CRUD ────────────────────────────────────────────────────────────────
 
 _GROUP_ID_TO_SHEET = {
