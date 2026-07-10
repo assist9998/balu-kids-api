@@ -418,10 +418,15 @@ def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db
     _refresh_children_cache_async()
     return {"ok": True}
 
+def _club_name(club_id: int, db: Session) -> str:
+    club = db.query(models.Club).filter_by(id=club_id).first()
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    return club.name_en
+
 @app.get("/club-attendance/{club_id}/{date}")
 def get_club_attendance(club_id: int, date: str, db: Session = Depends(get_db)):
-    rows = db.query(models.ClubAttendance).filter_by(club_id=club_id, date=date).all()
-    return {r.child_id: r.status for r in rows}
+    return sheets_client.get_club_attendance(_club_name(club_id, db), date)
 
 class ClubAttendanceIn(BaseModel):
     date:     str
@@ -429,11 +434,7 @@ class ClubAttendanceIn(BaseModel):
 
 @app.post("/club-attendance/{club_id}")
 def save_club_attendance(club_id: int, data: ClubAttendanceIn, db: Session = Depends(get_db)):
-    db.query(models.ClubAttendance).filter_by(club_id=club_id, date=data.date).delete()
-    for child_id, status in data.statuses.items():
-        db.add(models.ClubAttendance(club_id=club_id, date=data.date,
-                                      child_id=child_id, status=status))
-    db.commit()
+    sheets_client.upsert_club_attendance(_club_name(club_id, db), data.date, data.statuses)
     return {"ok": True}
 
 # ── Attendance ────────────────────────────────────────────────────────────────

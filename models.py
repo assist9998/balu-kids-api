@@ -25,14 +25,6 @@ class Club(Base):
     # Membership itself lives in the Children sheet's "Clubs" column (see sheets_client),
     # not here — that's the single source of truth for who's in which club.
 
-class ClubAttendance(Base):
-    __tablename__ = "club_attendance"
-    id       = Column(Integer, primary_key=True, autoincrement=True)
-    club_id  = Column(Integer, ForeignKey("clubs.id"))
-    date     = Column(String)   # "YYYY-MM-DD"
-    child_id = Column(String)   # "First Last"
-    status   = Column(String, default="present")
-
 class ClubScheduleCache(Base):
     """Local mirror of the (separate) Clubs sheet's price/days/time — same
     idea as ChildCache, just for the other Sheets tab /clubs merges in."""

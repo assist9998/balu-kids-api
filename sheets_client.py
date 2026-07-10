@@ -273,6 +273,64 @@ def upsert_attendance(date: str, statuses: dict) -> None:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
 
 
+def get_club_attendance(club_name: str, date: str) -> dict:
+    """Same idea as get_attendance, but one sheet per club (e.g. "Chess
+    attendance") instead of one shared sheet — clubs don't have a Group
+    column, and each club's roster is small enough that a dedicated tab
+    is easier for Ольга to read than a shared sheet with a Club column."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet(f"{club_name} attendance")
+    except gspread.WorksheetNotFound:
+        return {}
+    result = {}
+    for row in _rows_as_dicts(ws.get_all_values()):
+        if (row.get("Date") or "").strip() != date:
+            continue
+        name = (row.get("Child") or "").strip()
+        if not name:
+            continue
+        result[name] = "present" if (row.get("Status") or "").strip().lower() == "present" else "absent"
+    return result
+
+
+def upsert_club_attendance(club_name: str, date: str, statuses: dict) -> None:
+    sh = _sheet()
+    ws = sh.worksheet(f"{club_name} attendance")
+    values = ws.get_all_values()
+    headers = values[0] if values else ["Date", "Child", "Status"]
+    col = {h: i for i, h in enumerate(headers)}
+    date_i, child_i, status_i = col.get("Date", 0), col.get("Child", 1), col.get("Status", 2)
+
+    existing_row_for = {}
+    for i, row in enumerate(values[1:], start=2):
+        d = row[date_i] if date_i < len(row) else ""
+        c = row[child_i] if child_i < len(row) else ""
+        if d == date and c:
+            existing_row_for[c] = i
+
+    updates, appends = [], []
+    for name, status in statuses.items():
+        label = _STATUS_LABEL.get(status, status.capitalize())
+        if name in existing_row_for:
+            updates.append({
+                "range": gspread.utils.rowcol_to_a1(existing_row_for[name], status_i + 1),
+                "values": [[label]],
+            })
+        else:
+            managed_width = max(date_i, child_i, status_i) + 1
+            new_row = [""] * managed_width
+            new_row[date_i] = date
+            new_row[child_i] = name
+            new_row[status_i] = label
+            appends.append(new_row)
+
+    if updates:
+        ws.batch_update(updates)
+    if appends:
+        ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+
 def _parse_dmy(s: str):
     try:
         return datetime.strptime((s or "").strip(), "%d.%m.%Y").date()
