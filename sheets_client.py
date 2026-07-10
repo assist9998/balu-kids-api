@@ -221,6 +221,26 @@ def get_attendance(date: str) -> dict:
     return result
 
 
+def get_attendance_history(kid_id: str) -> dict:
+    """Every recorded day for one kid, across the whole Attendance sheet —
+    used by the per-kid attendance calendar, which shows history rather
+    than one date at a time like get_attendance does."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Attendance")
+    except gspread.WorksheetNotFound:
+        return {}
+    result = {}
+    for row in _rows_as_dicts(ws.get_all_values()):
+        if (row.get("Child") or "").strip() != kid_id:
+            continue
+        date = (row.get("Date") or "").strip()
+        if not date:
+            continue
+        result[date] = "present" if (row.get("Status") or "").strip().lower() == "present" else "absent"
+    return result
+
+
 def upsert_attendance(date: str, statuses: dict) -> None:
     """Mirror today's attendance marks into Ольга's Attendance sheet
     (Date/Child/Group/Status/Notes) so she can see them there too."""

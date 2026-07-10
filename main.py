@@ -452,6 +452,10 @@ def save_attendance(data: AttendanceIn):
     sheets_client.upsert_attendance(data.date, data.statuses)
     return {"ok": True}
 
+@app.get("/attendance-history/{kid_id}")
+def attendance_history(kid_id: str):
+    return sheets_client.get_attendance_history(kid_id)
+
 # ── Payment log ───────────────────────────────────────────────────────────────
 
 @app.get("/payment-log/{kid_id}")
