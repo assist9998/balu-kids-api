@@ -241,6 +241,27 @@ def get_attendance_history(kid_id: str) -> dict:
     return result
 
 
+def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
+    """Same idea as get_attendance_history, but for one club's own sheet
+    (e.g. "Chess attendance") instead of the shared garden Attendance
+    sheet — a kid's club calendar should show whether they showed up to
+    THAT club, not whether they were at the garden that day."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet(f"{club_name} attendance")
+    except gspread.WorksheetNotFound:
+        return {}
+    result = {}
+    for row in _rows_as_dicts(ws.get_all_values()):
+        if (row.get("Child") or "").strip() != kid_id:
+            continue
+        date = (row.get("Date") or "").strip()
+        if not date:
+            continue
+        result[date] = "present" if (row.get("Status") or "").strip().lower() == "present" else "absent"
+    return result
+
+
 def upsert_attendance(date: str, statuses: dict) -> None:
     """Mirror today's attendance marks into Ольга's Attendance sheet
     (Date/Child/Group/Status/Notes) so she can see them there too."""

@@ -437,6 +437,10 @@ def save_club_attendance(club_id: int, data: ClubAttendanceIn, db: Session = Dep
     sheets_client.upsert_club_attendance(_club_name(club_id, db), data.date, data.statuses)
     return {"ok": True}
 
+@app.get("/club-attendance-history/{club_id}/{kid_id}")
+def club_attendance_history(club_id: int, kid_id: str, db: Session = Depends(get_db)):
+    return sheets_client.get_club_attendance_history(_club_name(club_id, db), kid_id)
+
 # ── Attendance ────────────────────────────────────────────────────────────────
 
 @app.get("/attendance/{date}")
