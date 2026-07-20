@@ -416,16 +416,37 @@ def get_payment_log(kid_id: str) -> list[dict]:
 
 
 def _best_coverage(entries: list[dict]) -> tuple:
-    """Pick whichever entry covers furthest into the future — that's the
-    single "current period" Children!Paid from/until caches for the
-    overdue badge. Individual gaps between short-term visits live only in
-    the log itself, not in this rolled-up pair."""
-    best, best_until = None, None
+    """Merge overlapping/adjacent entries into contiguous covered ranges,
+    then cache whichever range covers *today* — so a one-off future
+    payment with a real gap before it (e.g. a stray extra day booked
+    weeks out) doesn't clobber the "from" of an earlier period that's
+    still what's actually covering right now. Falls back to whichever
+    range reaches furthest into the future if none of them cover today
+    (paid ahead for a period that hasn't started yet). Confirmed live:
+    logging month (01.07-31.07) then an isolated day with a gap
+    (05.08) used to jump paidFrom to 05.08, making an already-paid
+    "today" inside July read as unpaid."""
+    ranges = []
     for e in entries:
         until = _parse_dmy(e["until"])
-        if until and (best_until is None or until > best_until):
-            best, best_until = e, until
-    return (best["from"], best["until"]) if best else ("", "")
+        if not until:
+            continue
+        start = _parse_dmy(e["from"]) or until
+        ranges.append((start, until))
+    if not ranges:
+        return ("", "")
+    ranges.sort()
+    merged = [ranges[0]]
+    for start, until in ranges[1:]:
+        last_start, last_until = merged[-1]
+        if start <= last_until + timedelta(days=1):
+            merged[-1] = (last_start, max(last_until, until))
+        else:
+            merged.append((start, until))
+    today = datetime.now().date()
+    covering_today = next((r for r in merged if r[0] <= today <= r[1]), None)
+    best = covering_today or max(merged, key=lambda r: r[1])
+    return (best[0].strftime("%d.%m.%Y"), best[1].strftime("%d.%m.%Y"))
 
 
 def _find_child_row(children_values: list, kid_id: str):
