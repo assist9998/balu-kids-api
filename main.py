@@ -1,11 +1,13 @@
 import json
 import os
+import secrets
 import threading
 import time
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -146,6 +148,16 @@ app.add_middleware(CORSMiddleware,
 )
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+# In-memory session store: token -> {role, name}. Lost on backend restart —
+# same tradeoff as StaffAttendance/FeedItem already have on this box (no
+# persistent volume), acceptable since it just forces a re-login, which
+# already happens once a day anyway (see loadStoredRole's daily reset).
+_SESSIONS: dict[str, dict] = {}
+
+def _make_token(role: str, name: str | None = None) -> str:
+    token = secrets.token_urlsafe(32)
+    _SESSIONS[token] = {"role": role, "name": name}
+    return token
 
 class LoginIn(BaseModel):
     password: str
@@ -162,14 +174,26 @@ def login(data: LoginIn):
         for s in sheets_client.get_staff():
             if s["password"] and data.password == s["password"]:
                 role = _STAFF_POSITION_ROLE.get(s["position"].strip().lower(), "teacher")
-                return {"role": role, "name": s["name"]}
+                return {"role": role, "name": s["name"], "token": _make_token(role, s["name"])}
     except Exception:
         pass
     if data.password == os.environ.get("DIRECTOR_PASSWORD"):
-        return {"role": "director"}
+        return {"role": "director", "token": _make_token("director")}
     if data.password == os.environ.get("STAFF_PASSWORD"):
-        return {"role": "staff"}
+        return {"role": "staff", "token": _make_token("staff")}
     raise HTTPException(status_code=401, detail="Invalid password")
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    # CORS preflight and the login endpoint itself must stay open —
+    # everything else needs a valid token from a prior /auth/login.
+    if request.method == "OPTIONS" or request.url.path == "/auth/login":
+        return await call_next(request)
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else None
+    if not token or token not in _SESSIONS:
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    return await call_next(request)
 
 # ── Staff ─────────────────────────────────────────────────────────────────────
 
