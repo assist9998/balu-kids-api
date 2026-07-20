@@ -141,12 +141,6 @@ threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 
 app = FastAPI()
 
-app.add_middleware(CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # ── Auth ──────────────────────────────────────────────────────────────────────
 # In-memory session store: token -> {role, name}. Lost on backend restart —
 # same tradeoff as StaffAttendance/FeedItem already have on this box (no
@@ -194,6 +188,18 @@ async def require_auth(request: Request, call_next):
     if not token or token not in _SESSIONS:
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     return await call_next(request)
+
+# Registered *after* require_auth on purpose: Starlette wraps middleware in
+# reverse registration order, so whichever is added last ends up outermost.
+# CORS must be outermost so it can still stamp Access-Control-Allow-Origin
+# onto a 401 short-circuited by require_auth — otherwise the browser reports
+# a bare CORS failure instead of a readable 401, and the frontend's 401
+# handling (clear token, force re-login) never gets a response to look at.
+app.add_middleware(CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Staff ─────────────────────────────────────────────────────────────────────
 
