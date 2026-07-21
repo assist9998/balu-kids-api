@@ -3,7 +3,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,6 +92,57 @@ def _children_cache_refresh_loop() -> None:
         except Exception:
             pass
 
+# ── End-of-day attendance sweep ────────────────────────────────────────────────
+# Kids get an attendance row the moment staff actually mark them (see
+# save_attendance/save_club_attendance below) — nobody's status is written
+# until someone taps them. A kid nobody tapped all day still needs a record
+# that they were simply never marked (as opposed to "marked absent"), so
+# Ольга's sheet has the same complete daily picture it always did. This runs
+# once, late in the day, and backfills anyone with no row yet as "absent",
+# attributed to "Система" rather than whichever staff member happened to
+# touch the app last.
+ATTENDANCE_SWEEP_HOUR_BALI = 22  # Asia/Makassar is UTC+8, no DST
+_SWEEP_CHECK_SECONDS = 600
+_last_attendance_sweep_date: Optional[str] = None
+
+def _run_attendance_sweep(date: str, db: Session) -> None:
+    active = [c for c in _cached_children(db) if c.get("active", True)]
+
+    existing = sheets_client.get_attendance(date)
+    unmarked = {c["id"]: "absent" for c in active if c["id"] not in existing}
+    if unmarked:
+        sheets_client.upsert_attendance(date, unmarked, "Система")
+
+    kids_by_club = {}
+    for c in active:
+        for name in sheets_client.split_club_names(c["clubs"]):
+            kids_by_club.setdefault(name, []).append(c["id"])
+    for club in db.query(models.Club).all():
+        members = kids_by_club.get(club.name_en, [])
+        if not members:
+            continue
+        existing_club = sheets_client.get_club_attendance(club.name_en, date)
+        unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
+        if unmarked_club:
+            sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система")
+
+def _attendance_sweep_loop() -> None:
+    global _last_attendance_sweep_date
+    while True:
+        time.sleep(_SWEEP_CHECK_SECONDS)
+        bali_now = datetime.now(timezone.utc) + timedelta(hours=8)
+        bali_today = bali_now.strftime("%Y-%m-%d")
+        if bali_now.hour < ATTENDANCE_SWEEP_HOUR_BALI or bali_today == _last_attendance_sweep_date:
+            continue
+        db = SessionLocal()
+        try:
+            _run_attendance_sweep(bali_today, db)
+            _last_attendance_sweep_date = bali_today
+        except Exception:
+            pass  # Sheets hiccup — next cycle (still same Bali day) will retry
+        finally:
+            db.close()
+
 def _migrate():
     inspector = inspect(engine)
     tables = inspector.get_table_names()
@@ -138,6 +189,7 @@ try:
 except Exception:
     pass
 threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
+threading.Thread(target=_attendance_sweep_loop, daemon=True).start()
 
 app = FastAPI()
 
