@@ -565,9 +565,9 @@ class PaymentLogIn(BaseModel):
     amount:    str
 
 @app.post("/payment-log")
-def add_payment_log_entry(data: PaymentLogIn):
+def add_payment_log_entry(data: PaymentLogIn, request: Request):
     coverage = sheets_client.add_payment_log_entry(
-        data.kidId, data.tariff, data.dateFrom, data.dateUntil, data.amount)
+        data.kidId, data.tariff, data.dateFrom, data.dateUntil, data.amount, _marker(request))
     _refresh_children_cache_async()
     return {"ok": True, **coverage}
 
@@ -696,12 +696,12 @@ class ClubPaymentLogIn(BaseModel):
     amount:    str
 
 @app.post("/club-payment-log")
-def add_club_payment_log_entry(data: ClubPaymentLogIn, db: Session = Depends(get_db)):
+def add_club_payment_log_entry(data: ClubPaymentLogIn, request: Request, db: Session = Depends(get_db)):
     club = db.query(models.Club).filter_by(id=data.clubId).first()
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     coverage = sheets_client.add_club_payment_log_entry(
-        data.kidId, club.name_en, data.dateFrom, data.dateUntil, data.amount)
+        data.kidId, club.name_en, data.dateFrom, data.dateUntil, data.amount, _marker(request))
     return {"ok": True, **coverage}
 
 @app.delete("/club-payment-log/{row_id}")

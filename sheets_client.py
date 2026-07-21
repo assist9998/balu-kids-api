@@ -514,7 +514,7 @@ def _write_child_coverage(sh, children_values: list, kid_id: str, new_from: str,
         sh.worksheet("Children").batch_update(updates)
 
 
-def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str) -> dict:
+def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
     """Append one payment to the log — the manager types the amount they
     actually received, rather than the app computing it, so a pricing bug
     can't misstate what was collected. Returns the child's recomputed
@@ -522,7 +522,7 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
     sh = _sheet()
     ws = sh.worksheet("Payment log")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date"]
+    headers = values[0] if values else ["Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Marked by"]
     col = {h: i for i, h in enumerate(headers)}
 
     children_values = sh.worksheet("Children").get_all_values()
@@ -537,6 +537,7 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
         ("Child", kid_id), ("Group", group), ("Tariff", tariff),
         ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
         ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+        ("Marked by", marked_by),
     ):
         if field in col:
             new_row[col[field]] = value
@@ -696,14 +697,14 @@ def get_club_payment_log(club_name: str) -> list[dict]:
             for e in _parse_club_log_values(values) if e["club"] == club_name]
 
 
-def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str) -> dict:
+def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
     """Append one club payment. Returns this kid's recomputed coverage for
     *this* club only — never touches Children!Paid from/until, which is
     the garden-only cache."""
     sh = _sheet()
     ws = sh.worksheet("Club payment log")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date"]
+    headers = values[0] if values else ["Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Marked by"]
     col = {h: i for i, h in enumerate(headers)}
 
     children_values = sh.worksheet("Children").get_all_values()
@@ -718,6 +719,7 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
         ("Child", kid_id), ("Group", group), ("Club", club_name),
         ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
         ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+        ("Marked by", marked_by),
     ):
         if field in col:
             new_row[col[field]] = value
