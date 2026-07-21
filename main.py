@@ -191,7 +191,7 @@ async def require_auth(request: Request, call_next):
     return await call_next(request)
 
 def _marker(request: Request) -> str:
-    """Who to write into a sheet's "Отметил(а)" column for an action taken
+    """Who to write into a sheet's "Marked by" column for an action taken
     under the current session — the individual Staff-sheet login's own name
     when there is one, else just the role (shared DIRECTOR_PASSWORD/
     STAFF_PASSWORD logins never have a name attached)."""

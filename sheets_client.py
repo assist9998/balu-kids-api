@@ -264,14 +264,14 @@ def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
 
 def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
     """Mirror today's attendance marks into Ольга's Attendance sheet
-    (Date/Child/Group/Status/Отметил(а)/Notes) so she can see them there too."""
+    (Date/Child/Group/Status/Marked by/Notes) so she can see them there too."""
     sh = _sheet()
     ws = sh.worksheet("Attendance")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Отметил(а)", "Notes"]
+    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Marked by", "Notes"]
     col = {h: i for i, h in enumerate(headers)}
     date_i, child_i, group_i, status_i, marker_i = (
-        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3), col.get("Отметил(а)"),
+        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3), col.get("Marked by"),
     )
 
     groups = {}
@@ -349,10 +349,10 @@ def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by:
     sh = _sheet()
     ws = sh.worksheet(f"{club_name} attendance")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Status", "Отметил(а)"]
+    headers = values[0] if values else ["Date", "Child", "Status", "Marked by"]
     col = {h: i for i, h in enumerate(headers)}
     date_i, child_i, status_i, marker_i = (
-        col.get("Date", 0), col.get("Child", 1), col.get("Status", 2), col.get("Отметил(а)"),
+        col.get("Date", 0), col.get("Child", 1), col.get("Status", 2), col.get("Marked by"),
     )
 
     existing_row_for = {}
@@ -423,7 +423,7 @@ def _parse_log_values(values: list) -> list[dict]:
             "id": i, "child": row[child_i].strip(),
             "tariff": cell("Tariff"), "from": cell("Paid from"), "until": cell("Paid until"),
             "amount": cell("Amount"), "enteredDate": cell("Entered date"),
-            "markedBy": cell("Отметил(а)"),
+            "markedBy": cell("Marked by"),
         })
     return result
 
@@ -560,7 +560,7 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
 
     Written to the sheet (not just computed) so Ольга can see in Payment
     log *why* a kid's paid-until moved without her collecting anything —
-    the existing "Отметил(а)" column, always blank for entries she enters
+    the existing "Marked by" column, always blank for entries she enters
     herself, says "Система: перенос пропуска <date>" for these. That same
     marker is also the idempotency check: toggling a day between
     present/absent any number of times must never grant more than one
@@ -581,7 +581,7 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
     ws = sh.worksheet("Payment log")
     values = ws.get_all_values()
     headers = values[0] if values else [
-        "Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Отметил(а)",
+        "Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Marked by",
     ]
     col = {h: i for i, h in enumerate(headers)}
     entries = _parse_log_values(values)
@@ -621,7 +621,7 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
             ("Child", kid_id), ("Group", group), ("Tariff", _COMPENSATION_TARIFF),
             ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
             ("Entered date", datetime.now().strftime("%d.%m.%Y")),
-            ("Отметил(а)", f"Система: перенос пропуска {missed_dmy}"),
+            ("Marked by", f"Система: перенос пропуска {missed_dmy}"),
         ):
             if field in col:
                 row[col[field]] = value
@@ -680,7 +680,7 @@ def _parse_club_log_values(values: list) -> list[dict]:
             "id": i, "child": row[child_i].strip(), "club": cell("Club"),
             "from": cell("Paid from"), "until": cell("Paid until"),
             "amount": cell("Amount"), "enteredDate": cell("Entered date"),
-            "markedBy": cell("Отметил(а)"),
+            "markedBy": cell("Marked by"),
         })
     return result
 
@@ -751,7 +751,7 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
     ws = sh.worksheet("Club payment log")
     values = ws.get_all_values()
     headers = values[0] if values else [
-        "Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Отметил(а)",
+        "Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Marked by",
     ]
     col = {h: i for i, h in enumerate(headers)}
     entries = [e for e in _parse_club_log_values(values) if e["club"] == club_name]
@@ -768,7 +768,7 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
             continue  # missed day isn't inside a currently-paid window — nothing to carry over
 
         # Club payment log has no Tariff column (unlike the garden Payment
-        # log), so the missed-date text embedded in "Отметил(а)" is the
+        # log), so the missed-date text embedded in "Marked by" is the
         # only idempotency key available here.
         already_compensated = any(
             e["child"] == kid_id and missed_dmy in (e.get("markedBy") or "")
@@ -788,7 +788,7 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
             ("Child", kid_id), ("Group", group), ("Club", club_name),
             ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
             ("Entered date", datetime.now().strftime("%d.%m.%Y")),
-            ("Отметил(а)", f"Система: перенос пропуска {missed_dmy}"),
+            ("Marked by", f"Система: перенос пропуска {missed_dmy}"),
         ):
             if field in col:
                 row[col[field]] = value
