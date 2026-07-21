@@ -187,7 +187,16 @@ async def require_auth(request: Request, call_next):
     token = auth[7:] if auth.lower().startswith("bearer ") else None
     if not token or token not in _SESSIONS:
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    request.state.session = _SESSIONS[token]
     return await call_next(request)
+
+def _marker(request: Request) -> str:
+    """Who to write into a sheet's "Отметил(а)" column for an action taken
+    under the current session — the individual Staff-sheet login's own name
+    when there is one, else just the role (shared DIRECTOR_PASSWORD/
+    STAFF_PASSWORD logins never have a name attached)."""
+    session = getattr(request.state, "session", {}) or {}
+    return session.get("name") or session.get("role", "").capitalize()
 
 # Registered *after* require_auth on purpose: Starlette wraps middleware in
 # reverse registration order, so whichever is added last ends up outermost.
@@ -463,8 +472,8 @@ class ClubAttendanceIn(BaseModel):
     statuses: dict  # {child_id: "present" | "absent"}
 
 @app.post("/club-attendance/{club_id}")
-def save_club_attendance(club_id: int, data: ClubAttendanceIn, db: Session = Depends(get_db)):
-    sheets_client.upsert_club_attendance(_club_name(club_id, db), data.date, data.statuses)
+def save_club_attendance(club_id: int, data: ClubAttendanceIn, request: Request, db: Session = Depends(get_db)):
+    sheets_client.upsert_club_attendance(_club_name(club_id, db), data.date, data.statuses, _marker(request))
     return {"ok": True}
 
 @app.get("/club-attendance-history/{club_id}/{kid_id}")
@@ -482,8 +491,8 @@ class AttendanceIn(BaseModel):
     statuses: dict  # {kid_id: status}
 
 @app.post("/attendance")
-def save_attendance(data: AttendanceIn):
-    sheets_client.upsert_attendance(data.date, data.statuses)
+def save_attendance(data: AttendanceIn, request: Request):
+    sheets_client.upsert_attendance(data.date, data.statuses, _marker(request))
     return {"ok": True}
 
 @app.get("/attendance-history/{kid_id}")

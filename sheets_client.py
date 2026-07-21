@@ -262,16 +262,16 @@ def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
     return result
 
 
-def upsert_attendance(date: str, statuses: dict) -> None:
+def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
     """Mirror today's attendance marks into Ольга's Attendance sheet
-    (Date/Child/Group/Status/Notes) so she can see them there too."""
+    (Date/Child/Group/Status/Отметил(а)/Notes) so she can see them there too."""
     sh = _sheet()
     ws = sh.worksheet("Attendance")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Notes"]
+    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Отметил(а)", "Notes"]
     col = {h: i for i, h in enumerate(headers)}
-    date_i, child_i, group_i, status_i = (
-        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3),
+    date_i, child_i, group_i, status_i, marker_i = (
+        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3), col.get("Отметил(а)"),
     )
 
     groups = {}
@@ -294,24 +294,34 @@ def upsert_attendance(date: str, statuses: dict) -> None:
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
         if name in existing_row_for:
+            row_i = existing_row_for[name]
             updates.append({
-                "range": gspread.utils.rowcol_to_a1(existing_row_for[name], status_i + 1),
+                "range": gspread.utils.rowcol_to_a1(row_i, status_i + 1),
                 "values": [[label]],
             })
+            if marker_i is not None:
+                updates.append({
+                    "range": gspread.utils.rowcol_to_a1(row_i, marker_i + 1),
+                    "values": [[marked_by]],
+                })
         else:
-            managed_width = max(date_i, child_i, group_i or 0, status_i) + 1
+            managed_width = max(date_i, child_i, group_i or 0, status_i, marker_i or 0) + 1
             new_row = [""] * managed_width
             new_row[date_i] = date
             new_row[child_i] = name
             if group_i is not None:
                 new_row[group_i] = groups.get(name, "")
             new_row[status_i] = label
+            if marker_i is not None:
+                new_row[marker_i] = marked_by
             appends.append(new_row)
 
     if updates:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+    _apply_day_carryover(date, statuses)
 
 
 def get_club_attendance(club_name: str, date: str) -> dict:
@@ -335,13 +345,15 @@ def get_club_attendance(club_name: str, date: str) -> dict:
     return result
 
 
-def upsert_club_attendance(club_name: str, date: str, statuses: dict) -> None:
+def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "") -> None:
     sh = _sheet()
     ws = sh.worksheet(f"{club_name} attendance")
     values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Status"]
+    headers = values[0] if values else ["Date", "Child", "Status", "Отметил(а)"]
     col = {h: i for i, h in enumerate(headers)}
-    date_i, child_i, status_i = col.get("Date", 0), col.get("Child", 1), col.get("Status", 2)
+    date_i, child_i, status_i, marker_i = (
+        col.get("Date", 0), col.get("Child", 1), col.get("Status", 2), col.get("Отметил(а)"),
+    )
 
     existing_row_for = {}
     for i, row in enumerate(values[1:], start=2):
@@ -354,22 +366,32 @@ def upsert_club_attendance(club_name: str, date: str, statuses: dict) -> None:
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
         if name in existing_row_for:
+            row_i = existing_row_for[name]
             updates.append({
-                "range": gspread.utils.rowcol_to_a1(existing_row_for[name], status_i + 1),
+                "range": gspread.utils.rowcol_to_a1(row_i, status_i + 1),
                 "values": [[label]],
             })
+            if marker_i is not None:
+                updates.append({
+                    "range": gspread.utils.rowcol_to_a1(row_i, marker_i + 1),
+                    "values": [[marked_by]],
+                })
         else:
-            managed_width = max(date_i, child_i, status_i) + 1
+            managed_width = max(date_i, child_i, status_i, marker_i or 0) + 1
             new_row = [""] * managed_width
             new_row[date_i] = date
             new_row[child_i] = name
             new_row[status_i] = label
+            if marker_i is not None:
+                new_row[marker_i] = marked_by
             appends.append(new_row)
 
     if updates:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+    _apply_club_day_carryover(club_name, date, statuses)
 
 
 def _parse_dmy(s: str):
@@ -401,6 +423,7 @@ def _parse_log_values(values: list) -> list[dict]:
             "id": i, "child": row[child_i].strip(),
             "tariff": cell("Tariff"), "from": cell("Paid from"), "until": cell("Paid until"),
             "amount": cell("Amount"), "enteredDate": cell("Entered date"),
+            "markedBy": cell("Отметил(а)"),
         })
     return result
 
@@ -447,6 +470,18 @@ def _best_coverage(entries: list[dict]) -> tuple:
     covering_today = next((r for r in merged if r[0] <= today <= r[1]), None)
     best = covering_today or max(merged, key=lambda r: r[1])
     return (best[0].strftime("%d.%m.%Y"), best[1].strftime("%d.%m.%Y"))
+
+
+_DAY_RATE_MAX_DAYS = 26  # [ПРАВИЛО] paid period > 26 days = monthly plan, <= 26 = per-day plan
+
+
+def _is_day_rate(from_dmy: str, until_dmy: str) -> bool:
+    """A kid's current paid period counts as a per-day plan (as opposed to
+    monthly) purely by how many days it spans — see _DAY_RATE_MAX_DAYS."""
+    f, u = _parse_dmy(from_dmy), _parse_dmy(until_dmy)
+    if not f or not u:
+        return False
+    return 0 < (u - f).days + 1 <= _DAY_RATE_MAX_DAYS
 
 
 def _find_child_row(children_values: list, kid_id: str):
@@ -514,6 +549,93 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
+_COMPENSATION_TARIFF = "compensation"
+
+
+def _apply_day_carryover(date: str, statuses: dict) -> None:
+    """A kid on a per-day plan (see _is_day_rate) who's marked absent on a
+    weekday inside their already-paid window doesn't lose that day — this
+    logs a zero-amount 'compensation' row that pushes their coverage
+    forward by one day, same as a real payment would.
+
+    Written to the sheet (not just computed) so Ольга can see in Payment
+    log *why* a kid's paid-until moved without her collecting anything —
+    the existing "Отметил(а)" column, always blank for entries she enters
+    herself, says "Система: перенос пропуска <date>" for these. That same
+    marker is also the idempotency check: toggling a day between
+    present/absent any number of times must never grant more than one
+    compensation day per missed date.
+    """
+    try:
+        d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return
+    if d.weekday() >= 5:
+        return
+    missed_dmy = d.strftime("%d.%m.%Y")
+    absent_kids = [kid_id for kid_id, status in statuses.items() if status == "absent"]
+    if not absent_kids:
+        return
+
+    sh = _sheet()
+    ws = sh.worksheet("Payment log")
+    values = ws.get_all_values()
+    headers = values[0] if values else [
+        "Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Отметил(а)",
+    ]
+    col = {h: i for i, h in enumerate(headers)}
+    entries = _parse_log_values(values)
+    children_values = sh.worksheet("Children").get_all_values()
+
+    new_rows = []
+    coverage_updates = {}  # kid_id -> (new_from, new_until), applied after the log is written
+    for kid_id in absent_kids:
+        _, child_row, ccol = _find_child_row(children_values, kid_id)
+        kid_entries = [e for e in entries if e["child"] == kid_id]
+        cov_from, cov_until = _best_coverage(kid_entries)
+        if not cov_until:
+            from_i, until_i = ccol.get("Paid from"), ccol.get("Paid until")
+            cov_from = (child_row[from_i] if child_row and from_i is not None and from_i < len(child_row) else "").strip()
+            cov_until = (child_row[until_i] if child_row and until_i is not None and until_i < len(child_row) else "").strip()
+        if not _is_day_rate(cov_from, cov_until):
+            continue
+        cov_from_d, cov_until_d = _parse_dmy(cov_from), _parse_dmy(cov_until)
+        if not cov_from_d or not cov_until_d or not (cov_from_d <= d <= cov_until_d):
+            continue  # missed day isn't inside a currently-paid window — nothing to carry over
+
+        already_compensated = any(
+            e["child"] == kid_id and e.get("tariff") == _COMPENSATION_TARIFF
+            and missed_dmy in (e.get("markedBy") or "")
+            for e in entries
+        )
+        if already_compensated:
+            continue
+
+        extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
+        group_i = ccol.get("Group")
+        group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+
+        width = max(col.values(), default=-1) + 1
+        row = [""] * width
+        for field, value in (
+            ("Child", kid_id), ("Group", group), ("Tariff", _COMPENSATION_TARIFF),
+            ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
+            ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+            ("Отметил(а)", f"Система: перенос пропуска {missed_dmy}"),
+        ):
+            if field in col:
+                row[col[field]] = value
+        new_rows.append(row)
+
+        kid_entries.append({"from": extra_dmy, "until": extra_dmy})
+        coverage_updates[kid_id] = _best_coverage(kid_entries)
+
+    if new_rows:
+        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    for kid_id, (new_from, new_until) in coverage_updates.items():
+        _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+
+
 def delete_payment_log_entry(row_id: int) -> dict:
     """Remove one logged payment (a manager correcting a mistake) and
     recompute the owning child's cached coverage from what's left."""
@@ -558,6 +680,7 @@ def _parse_club_log_values(values: list) -> list[dict]:
             "id": i, "child": row[child_i].strip(), "club": cell("Club"),
             "from": cell("Paid from"), "until": cell("Paid until"),
             "amount": cell("Amount"), "enteredDate": cell("Entered date"),
+            "markedBy": cell("Отметил(а)"),
         })
     return result
 
@@ -604,6 +727,75 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
     existing.append({"from": new_from_dmy, "until": new_until_dmy})
     new_from, new_until = _best_coverage(existing)
     return {"paidFrom": new_from, "paidUntil": new_until}
+
+
+def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None:
+    """Same idea as _apply_day_carryover, scoped to one club — a kid on a
+    per-day club plan who misses a weekday inside their paid window gets a
+    zero-amount 'compensation' row in Club payment log instead of losing
+    it. Unlike the garden, there's no Children-sheet cache to update
+    afterwards (see add_club_payment_log_entry) — the log itself is the
+    only source of truth for a kid's per-club coverage."""
+    try:
+        d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return
+    if d.weekday() >= 5:
+        return
+    missed_dmy = d.strftime("%d.%m.%Y")
+    absent_kids = [kid_id for kid_id, status in statuses.items() if status == "absent"]
+    if not absent_kids:
+        return
+
+    sh = _sheet()
+    ws = sh.worksheet("Club payment log")
+    values = ws.get_all_values()
+    headers = values[0] if values else [
+        "Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Отметил(а)",
+    ]
+    col = {h: i for i, h in enumerate(headers)}
+    entries = [e for e in _parse_club_log_values(values) if e["club"] == club_name]
+    children_values = sh.worksheet("Children").get_all_values()
+
+    new_rows = []
+    for kid_id in absent_kids:
+        kid_entries = [e for e in entries if e["child"] == kid_id]
+        cov_from, cov_until = _best_coverage(kid_entries)
+        if not _is_day_rate(cov_from, cov_until):
+            continue
+        cov_from_d, cov_until_d = _parse_dmy(cov_from), _parse_dmy(cov_until)
+        if not cov_from_d or not cov_until_d or not (cov_from_d <= d <= cov_until_d):
+            continue  # missed day isn't inside a currently-paid window — nothing to carry over
+
+        # Club payment log has no Tariff column (unlike the garden Payment
+        # log), so the missed-date text embedded in "Отметил(а)" is the
+        # only idempotency key available here.
+        already_compensated = any(
+            e["child"] == kid_id and missed_dmy in (e.get("markedBy") or "")
+            for e in entries
+        )
+        if already_compensated:
+            continue
+
+        extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
+        _, child_row, ccol = _find_child_row(children_values, kid_id)
+        group_i = ccol.get("Group")
+        group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+
+        width = max(col.values(), default=-1) + 1
+        row = [""] * width
+        for field, value in (
+            ("Child", kid_id), ("Group", group), ("Club", club_name),
+            ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
+            ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+            ("Отметил(а)", f"Система: перенос пропуска {missed_dmy}"),
+        ):
+            if field in col:
+                row[col[field]] = value
+        new_rows.append(row)
+
+    if new_rows:
+        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
 
 
 def delete_club_payment_log_entry(row_id: int) -> dict:
