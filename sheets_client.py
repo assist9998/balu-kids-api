@@ -205,8 +205,21 @@ _STATUS_LABEL = {"present": "Present", "absent": "Away", "late": "Away"}
 
 
 def get_attendance(date: str) -> dict:
-    """Read today's marks straight from Ольга's Attendance sheet, so
-    anything she edits or deletes there is what the app shows."""
+    """Read today's marks — normally straight from Ольга's Attendance sheet,
+    so anything she edits or deletes there is what the app shows.
+
+    Phase 4 of the Sheets -> Postgres migration, module 2 (see
+    get_attendance_history for module 1): tries Postgres first, falls back
+    to the exact old Sheets code on any failure. A direct edit she makes in
+    the sheet itself can lag up to one shadow_sync cycle (~5 min) before
+    showing here — an accepted, temporary tradeoff on the way to Sheets
+    becoming a pure mirror (no direct editing at all) once the migration
+    finishes, same end state as Gorizont's."""
+    try:
+        return pg_dual_write.read_attendance(date)
+    except Exception as e:
+        print(f"[phase4] get_attendance: Postgres read failed, falling back to Sheets: {e}")
+
     sh = _sheet()
     try:
         ws = sh.worksheet("Attendance")

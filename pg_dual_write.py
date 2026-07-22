@@ -220,6 +220,23 @@ def _require_pool():
     return pool
 
 
+def read_attendance(date: str) -> dict:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT child, status FROM attendance WHERE date = %s", (date,))
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    result = {}
+    for child, status in rows:
+        if not child:
+            continue
+        result[child] = "present" if (status or "").strip().lower() == "present" else "absent"
+    return result
+
+
 def read_attendance_history(child: str) -> dict:
     pool = _require_pool()
     conn = pool.getconn()
