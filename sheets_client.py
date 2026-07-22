@@ -226,7 +226,19 @@ def get_attendance(date: str) -> dict:
 def get_attendance_history(kid_id: str) -> dict:
     """Every recorded day for one kid, across the whole Attendance sheet —
     used by the per-kid attendance calendar, which shows history rather
-    than one date at a time like get_attendance does."""
+    than one date at a time like get_attendance does.
+
+    Phase 4 of the Sheets -> Postgres migration: this is the first read
+    switched over (see pg_dual_write.read_attendance_history) — it's the
+    most isolated one, a single kid's calendar view that nothing else reads
+    or depends on. Any Postgres hiccup falls back to the exact old
+    Sheets-reading code below, so this can't make the feature worse, only
+    occasionally slower."""
+    try:
+        return pg_dual_write.read_attendance_history(kid_id)
+    except Exception as e:
+        print(f"[phase4] get_attendance_history: Postgres read failed, falling back to Sheets: {e}")
+
     sh = _sheet()
     try:
         ws = sh.worksheet("Attendance")
@@ -247,7 +259,13 @@ def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
     """Same idea as get_attendance_history, but for one club's own sheet
     (e.g. "Chess attendance") instead of the shared garden Attendance
     sheet — a kid's club calendar should show whether they showed up to
-    THAT club, not whether they were at the garden that day."""
+    THAT club, not whether they were at the garden that day. Same Phase 4
+    Postgres-first-with-fallback treatment as get_attendance_history."""
+    try:
+        return pg_dual_write.read_club_attendance_history(club_name, kid_id)
+    except Exception as e:
+        print(f"[phase4] get_club_attendance_history: Postgres read failed, falling back to Sheets: {e}")
+
     sh = _sheet()
     try:
         ws = sh.worksheet(f"{club_name} attendance")

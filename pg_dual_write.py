@@ -203,3 +203,45 @@ def rename_staff(old_name: str, name, position, contract_end, phone, password, r
 
 def delete_staff(name: str) -> None:
     _run("delete_staff", lambda cur: cur.execute("DELETE FROM staff WHERE name = %s", (name,)))
+
+
+# ── Phase 4: reads ──────────────────────────────────────────────────────────────
+# Unlike every write helper above, these RAISE instead of swallowing errors —
+# the caller (sheets_client.py) is expected to catch and fall back to reading
+# Sheets directly, same "_rows() with fallback" shape Gorizont's migration used
+# for its first safe read functions. Only the most isolated reads (a single
+# kid's attendance calendar, not anything the write path depends on) move to
+# Postgres first; everything else still reads Sheets until this proves stable.
+
+def _require_pool():
+    pool = _get_pool()
+    if pool is None:
+        raise RuntimeError("BALU_PG_DSN not configured or pool unavailable")
+    return pool
+
+
+def read_attendance_history(child: str) -> dict:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT date, status FROM attendance WHERE child = %s", (child,))
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return {date: ("present" if (status or "").strip().lower() == "present" else "absent") for date, status in rows}
+
+
+def read_club_attendance_history(club_name: str, child: str) -> dict:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT date, status FROM club_attendance WHERE club_name = %s AND child = %s",
+                (club_name, child),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return {date: ("present" if (status or "").strip().lower() == "present" else "absent") for date, status in rows}
