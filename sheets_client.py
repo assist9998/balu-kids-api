@@ -307,66 +307,17 @@ def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
 
 
 def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
-    """Mirror today's attendance marks into Ольга's Attendance sheet
-    (Date/Child/Group/Status/Marked by/Notes) so she can see them there too."""
-    sh = _sheet()
-    ws = sh.worksheet("Attendance")
-    values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Group", "Status", "Marked by", "Notes"]
-    col = {h: i for i, h in enumerate(headers)}
-    date_i, child_i, group_i, status_i, marker_i = (
-        col.get("Date", 0), col.get("Child", 1), col.get("Group"), col.get("Status", 3), col.get("Marked by"),
-    )
-
+    """Phase 5: writes straight to Postgres, no Sheets involved — Ольга's
+    Attendance sheet is kept current by the push_to_sheets cron instead
+    (Postgres -> Sheets, ~10 min), not by the app writing it directly."""
     groups = {}
-    try:
-        for row in _rows_as_dicts(sh.worksheet("Children").get_all_values()):
-            name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
-            if name:
-                groups[name] = (row.get("Group") or "").strip()
-    except gspread.WorksheetNotFound:
-        pass
+    for row in pg_dual_write.read_children_rows():
+        name = f"{(row.get('First name') or '').strip()} {(row.get('Last name') or '').strip()}".strip()
+        if name:
+            groups[name] = (row.get("Group") or "").strip()
 
-    existing_row_for = {}
-    for i, row in enumerate(values[1:], start=2):
-        d = row[date_i] if date_i < len(row) else ""
-        c = row[child_i] if child_i < len(row) else ""
-        if d == date and c:
-            existing_row_for[c] = i
-
-    updates, appends, labels = [], [], {}
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
-        labels[name] = label
-        if name in existing_row_for:
-            row_i = existing_row_for[name]
-            updates.append({
-                "range": gspread.utils.rowcol_to_a1(row_i, status_i + 1),
-                "values": [[label]],
-            })
-            if marker_i is not None:
-                updates.append({
-                    "range": gspread.utils.rowcol_to_a1(row_i, marker_i + 1),
-                    "values": [[marked_by]],
-                })
-        else:
-            managed_width = max(date_i, child_i, group_i or 0, status_i, marker_i or 0) + 1
-            new_row = [""] * managed_width
-            new_row[date_i] = date
-            new_row[child_i] = name
-            if group_i is not None:
-                new_row[group_i] = groups.get(name, "")
-            new_row[status_i] = label
-            if marker_i is not None:
-                new_row[marker_i] = marked_by
-            appends.append(new_row)
-
-    if updates:
-        ws.batch_update(updates)
-    if appends:
-        ws.append_rows(appends, value_input_option="USER_ENTERED")
-
-    for name, label in labels.items():
         pg_dual_write.upsert_attendance(date, name, groups.get(name, ""), label, marked_by)
 
     _apply_day_carryover(date, statuses)
@@ -394,53 +345,9 @@ def get_club_attendance(club_name: str, date: str) -> dict:
 
 
 def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "") -> None:
-    sh = _sheet()
-    ws = sh.worksheet(f"{club_name} attendance")
-    values = ws.get_all_values()
-    headers = values[0] if values else ["Date", "Child", "Status", "Marked by"]
-    col = {h: i for i, h in enumerate(headers)}
-    date_i, child_i, status_i, marker_i = (
-        col.get("Date", 0), col.get("Child", 1), col.get("Status", 2), col.get("Marked by"),
-    )
-
-    existing_row_for = {}
-    for i, row in enumerate(values[1:], start=2):
-        d = row[date_i] if date_i < len(row) else ""
-        c = row[child_i] if child_i < len(row) else ""
-        if d == date and c:
-            existing_row_for[c] = i
-
-    updates, appends, labels = [], [], {}
+    """Phase 5: writes straight to Postgres — see upsert_attendance."""
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
-        labels[name] = label
-        if name in existing_row_for:
-            row_i = existing_row_for[name]
-            updates.append({
-                "range": gspread.utils.rowcol_to_a1(row_i, status_i + 1),
-                "values": [[label]],
-            })
-            if marker_i is not None:
-                updates.append({
-                    "range": gspread.utils.rowcol_to_a1(row_i, marker_i + 1),
-                    "values": [[marked_by]],
-                })
-        else:
-            managed_width = max(date_i, child_i, status_i, marker_i or 0) + 1
-            new_row = [""] * managed_width
-            new_row[date_i] = date
-            new_row[child_i] = name
-            new_row[status_i] = label
-            if marker_i is not None:
-                new_row[marker_i] = marked_by
-            appends.append(new_row)
-
-    if updates:
-        ws.batch_update(updates)
-    if appends:
-        ws.append_rows(appends, value_input_option="USER_ENTERED")
-
-    for name, label in labels.items():
         pg_dual_write.upsert_club_attendance(club_name, date, name, label, marked_by)
 
     _apply_club_day_carryover(club_name, date, statuses)
@@ -544,71 +451,22 @@ def _is_day_rate(from_dmy: str, until_dmy: str) -> bool:
     return 0 < (u - f).days + 1 <= _DAY_RATE_MAX_DAYS
 
 
-def _find_child_row(children_values: list, kid_id: str):
-    """Row index + column map for one child, from an already-fetched
-    Children!get_all_values() — callers that also need Children data for
-    something else (group lookup, etc.) can fetch it once and pass it in
-    instead of each doing their own read."""
-    headers = children_values[0] if children_values else []
-    col = {h: i for i, h in enumerate(headers)}
-    first_i, last_i = col.get("First name"), col.get("Last name")
-    for i, row in enumerate(children_values[1:], start=2):
-        first = row[first_i] if first_i is not None and first_i < len(row) else ""
-        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
-        if f"{first} {last}".strip() == kid_id:
-            return i, row, col
-    return None, None, col
-
-
-def _write_child_coverage(sh, children_values: list, kid_id: str, new_from: str, new_until: str) -> None:
-    row_i, row, col = _find_child_row(children_values, kid_id)
-    if row_i is None:
-        return
-    from_i, until_i = col.get("Paid from"), col.get("Paid until")
-    updates = []
-    if from_i is not None:
-        updates.append({"range": gspread.utils.rowcol_to_a1(row_i, from_i + 1), "values": [[new_from]]})
-    if until_i is not None:
-        updates.append({"range": gspread.utils.rowcol_to_a1(row_i, until_i + 1), "values": [[new_until]]})
-    if updates:
-        sh.worksheet("Children").batch_update(updates)
-
-
 def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
     """Append one payment to the log — the manager types the amount they
     actually received, rather than the app computing it, so a pricing bug
     can't misstate what was collected. Returns the child's recomputed
-    current coverage."""
-    sh = _sheet()
-    ws = sh.worksheet("Payment log")
-    values = ws.get_all_values()
-    headers = values[0] if values else ["Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Marked by"]
-    col = {h: i for i, h in enumerate(headers)}
+    current coverage.
 
-    children_values = sh.worksheet("Children").get_all_values()
-    _, child_row, ccol = _find_child_row(children_values, kid_id)
-    group_i = ccol.get("Group")
-    group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+    Phase 5: writes straight to Postgres, no Sheets involved."""
+    summary = pg_dual_write.get_child_summary(kid_id)
+    group = summary["group"] if summary else ""
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
     entered_date = datetime.now().strftime("%d.%m.%Y")
-    width = max(col.values(), default=-1) + 1
-    new_row = [""] * width
-    for field, value in (
-        ("Child", kid_id), ("Group", group), ("Tariff", tariff),
-        ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
-        ("Amount", amount), ("Entered date", entered_date),
-        ("Marked by", marked_by),
-    ):
-        if field in col:
-            new_row[col[field]] = value
-    ws.append_rows([new_row], value_input_option="USER_ENTERED")
     pg_dual_write.insert_payment_log(kid_id, group, tariff, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
 
-    existing = [e for e in _parse_log_values(values) if e["child"] == kid_id]
-    existing.append({"from": new_from_dmy, "until": new_until_dmy})
+    existing = pg_dual_write.get_payment_log_entries(kid_id)
     new_from, new_until = _best_coverage(existing)
-    _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
     pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
@@ -622,13 +480,12 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
     logs a zero-amount 'compensation' row that pushes their coverage
     forward by one day, same as a real payment would.
 
-    Written to the sheet (not just computed) so Ольга can see in Payment
-    log *why* a kid's paid-until moved without her collecting anything —
-    the existing "Marked by" column, always blank for entries she enters
-    herself, says "Система: перенос пропуска <date>" for these. That same
-    marker is also the idempotency check: toggling a day between
-    present/absent any number of times must never grant more than one
-    compensation day per missed date.
+    Phase 5: reads/writes Postgres directly, no Sheets involved — the
+    "Marked by" column ("Система: перенос пропуска <date>") still exists in
+    the compensation row so Ольга can see why paid-until moved once
+    push_to_sheets carries it over; that same marker text is also the
+    idempotency check: toggling a day between present/absent any number of
+    times must never grant more than one compensation day per missed date.
     """
     try:
         d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
@@ -641,27 +498,13 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
     if not absent_kids:
         return
 
-    sh = _sheet()
-    ws = sh.worksheet("Payment log")
-    values = ws.get_all_values()
-    headers = values[0] if values else [
-        "Child", "Group", "Tariff", "Paid from", "Paid until", "Amount", "Entered date", "Marked by",
-    ]
-    col = {h: i for i, h in enumerate(headers)}
-    entries = _parse_log_values(values)
-    children_values = sh.worksheet("Children").get_all_values()
-
-    new_rows = []
-    pg_rows = []  # mirrors new_rows for the Postgres dual-write, since it needs plain values, not column indices
-    coverage_updates = {}  # kid_id -> (new_from, new_until), applied after the log is written
     for kid_id in absent_kids:
-        _, child_row, ccol = _find_child_row(children_values, kid_id)
-        kid_entries = [e for e in entries if e["child"] == kid_id]
+        kid_entries = pg_dual_write.get_payment_log_entries(kid_id)
         cov_from, cov_until = _best_coverage(kid_entries)
         if not cov_until:
-            from_i, until_i = ccol.get("Paid from"), ccol.get("Paid until")
-            cov_from = (child_row[from_i] if child_row and from_i is not None and from_i < len(child_row) else "").strip()
-            cov_until = (child_row[until_i] if child_row and until_i is not None and until_i < len(child_row) else "").strip()
+            summary = pg_dual_write.get_child_summary(kid_id)
+            cov_from = summary["paid_from"] if summary else ""
+            cov_until = summary["paid_until"] if summary else ""
         if not _is_day_rate(cov_from, cov_until):
             continue
         cov_from_d, cov_until_d = _parse_dmy(cov_from), _parse_dmy(cov_until)
@@ -669,41 +512,22 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
             continue  # missed day isn't inside a currently-paid window — nothing to carry over
 
         already_compensated = any(
-            e["child"] == kid_id and e.get("tariff") == _COMPENSATION_TARIFF
-            and missed_dmy in (e.get("markedBy") or "")
-            for e in entries
+            e.get("tariff") == _COMPENSATION_TARIFF and missed_dmy in (e.get("markedBy") or "")
+            for e in kid_entries
         )
         if already_compensated:
             continue
 
         extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
-        group_i = ccol.get("Group")
-        group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
-
+        summary = pg_dual_write.get_child_summary(kid_id)
+        group = summary["group"] if summary else ""
         entered_date = datetime.now().strftime("%d.%m.%Y")
         marker_text = f"Система: перенос пропуска {missed_dmy}"
-        width = max(col.values(), default=-1) + 1
-        row = [""] * width
-        for field, value in (
-            ("Child", kid_id), ("Group", group), ("Tariff", _COMPENSATION_TARIFF),
-            ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
-            ("Entered date", entered_date),
-            ("Marked by", marker_text),
-        ):
-            if field in col:
-                row[col[field]] = value
-        new_rows.append(row)
-        pg_rows.append((kid_id, group, extra_dmy, entered_date, marker_text))
+
+        pg_dual_write.insert_payment_log(kid_id, group, _COMPENSATION_TARIFF, extra_dmy, extra_dmy, "0", entered_date, marker_text)
 
         kid_entries.append({"from": extra_dmy, "until": extra_dmy})
-        coverage_updates[kid_id] = _best_coverage(kid_entries)
-
-    if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
-    for kid_id, group, extra_dmy, entered_date, marker_text in pg_rows:
-        pg_dual_write.insert_payment_log(kid_id, group, _COMPENSATION_TARIFF, extra_dmy, extra_dmy, "0", entered_date, marker_text)
-    for kid_id, (new_from, new_until) in coverage_updates.items():
-        _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+        new_from, new_until = _best_coverage(kid_entries)
         pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
 
 
@@ -711,54 +535,18 @@ def delete_payment_log_entry(row_id: int) -> dict:
     """Remove one logged payment (a manager correcting a mistake) and
     recompute the owning child's cached coverage from what's left.
 
-    Phase 4, module 3: row_id is normally a Postgres payment_log.id now
-    (get_payment_log reads from there — see above). Look it up by that id
-    first; the matching sheet row is found by full content, never by
-    position. Falls back to the pre-Phase-4 position-based path only if
-    nothing matches in Postgres, meaning the read that produced this id had
-    itself fallen back to Sheets (row_id is then a real sheet position)."""
-    sh = _sheet()
-    ws = sh.worksheet("Payment log")
-    values = ws.get_all_values()
-    entries = _parse_log_values(values)
+    Phase 5: row_id is a Postgres payment_log.id — the only id the frontend
+    has ever been given since Phase 4 switched get_payment_log's read to
+    Postgres. Straight delete by id, no more Sheets/position handling at
+    all."""
+    entry = pg_dual_write.get_payment_log_entry_by_id(row_id)
+    if entry is None:
+        raise ValueError(f"Payment log row not found: {row_id}")
+    kid_id = entry["child"]
+    pg_dual_write.delete_payment_log_by_id(row_id)
 
-    pg_entry = None
-    try:
-        pg_entry = pg_dual_write.get_payment_log_entry_by_id(row_id)
-    except Exception as e:
-        print(f"[phase4] delete_payment_log_entry: Postgres lookup failed: {e}")
-
-    if pg_entry is not None:
-        kid_id = pg_entry["child"]
-        target = next(
-            (e for e in entries if e["child"] == pg_entry["child"] and e["tariff"] == pg_entry["tariff"]
-             and e["from"] == pg_entry["from"] and e["until"] == pg_entry["until"]
-             and e["amount"] == pg_entry["amount"] and e["enteredDate"] == pg_entry["enteredDate"]
-             and e["markedBy"] == pg_entry["markedBy"]),
-            None,
-        )
-        if target:
-            ws.delete_rows(target["id"])
-        pg_dual_write.delete_payment_log_by_id(row_id)
-        remaining = [e for e in entries if e["child"] == kid_id and (target is None or e["id"] != target["id"])]
-    else:
-        if row_id < 2 or row_id > len(values):
-            raise ValueError(f"Payment log row not found: {row_id}")
-        target = next((e for e in entries if e["id"] == row_id), None)
-        kid_id = target["child"] if target else ""
-        ws.delete_rows(row_id)
-        if target:
-            pg_dual_write.delete_payment_log(
-                target["child"], target["tariff"], target["from"], target["until"],
-                target["amount"], target["enteredDate"], target["markedBy"],
-            )
-        if not kid_id:
-            return {}
-        remaining = [e for e in entries if e["child"] == kid_id and e["id"] != row_id]
-
+    remaining = pg_dual_write.get_payment_log_entries(kid_id)
     new_from, new_until = _best_coverage(remaining)
-    children_values = sh.worksheet("Children").get_all_values()
-    _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
     pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
@@ -812,35 +600,17 @@ def get_club_payment_log(club_name: str) -> list[dict]:
 def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
     """Append one club payment. Returns this kid's recomputed coverage for
     *this* club only — never touches Children!Paid from/until, which is
-    the garden-only cache."""
-    sh = _sheet()
-    ws = sh.worksheet("Club payment log")
-    values = ws.get_all_values()
-    headers = values[0] if values else ["Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Marked by"]
-    col = {h: i for i, h in enumerate(headers)}
+    the garden-only cache.
 
-    children_values = sh.worksheet("Children").get_all_values()
-    _, child_row, ccol = _find_child_row(children_values, kid_id)
-    group_i = ccol.get("Group")
-    group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
+    Phase 5: writes straight to Postgres, no Sheets involved."""
+    summary = pg_dual_write.get_child_summary(kid_id)
+    group = summary["group"] if summary else ""
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
     entered_date = datetime.now().strftime("%d.%m.%Y")
-    width = max(col.values(), default=-1) + 1
-    new_row = [""] * width
-    for field, value in (
-        ("Child", kid_id), ("Group", group), ("Club", club_name),
-        ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
-        ("Amount", amount), ("Entered date", entered_date),
-        ("Marked by", marked_by),
-    ):
-        if field in col:
-            new_row[col[field]] = value
-    ws.append_rows([new_row], value_input_option="USER_ENTERED")
     pg_dual_write.insert_club_payment_log(kid_id, group, club_name, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
 
-    existing = [e for e in _parse_club_log_values(values) if e["child"] == kid_id and e["club"] == club_name]
-    existing.append({"from": new_from_dmy, "until": new_until_dmy})
+    existing = [e for e in pg_dual_write.get_club_payment_log_entries(club_name) if e["child"] == kid_id]
     new_from, new_until = _best_coverage(existing)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
@@ -849,9 +619,11 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
     """Same idea as _apply_day_carryover, scoped to one club — a kid on a
     per-day club plan who misses a weekday inside their paid window gets a
     zero-amount 'compensation' row in Club payment log instead of losing
-    it. Unlike the garden, there's no Children-sheet cache to update
+    it. Unlike the garden, there's no Children coverage cache to update
     afterwards (see add_club_payment_log_entry) — the log itself is the
-    only source of truth for a kid's per-club coverage."""
+    only source of truth for a kid's per-club coverage.
+
+    Phase 5: reads/writes Postgres directly, no Sheets involved."""
     try:
         d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
     except ValueError:
@@ -863,18 +635,8 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
     if not absent_kids:
         return
 
-    sh = _sheet()
-    ws = sh.worksheet("Club payment log")
-    values = ws.get_all_values()
-    headers = values[0] if values else [
-        "Child", "Group", "Club", "Paid from", "Paid until", "Amount", "Entered date", "Marked by",
-    ]
-    col = {h: i for i, h in enumerate(headers)}
-    entries = [e for e in _parse_club_log_values(values) if e["club"] == club_name]
-    children_values = sh.worksheet("Children").get_all_values()
+    entries = pg_dual_write.get_club_payment_log_entries(club_name)
 
-    new_rows = []
-    pg_rows = []
     for kid_id in absent_kids:
         kid_entries = [e for e in entries if e["child"] == kid_id]
         cov_from, cov_until = _best_coverage(kid_entries)
@@ -895,28 +657,11 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
             continue
 
         extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
-        _, child_row, ccol = _find_child_row(children_values, kid_id)
-        group_i = ccol.get("Group")
-        group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
-
+        summary = pg_dual_write.get_child_summary(kid_id)
+        group = summary["group"] if summary else ""
         entered_date = datetime.now().strftime("%d.%m.%Y")
         marker_text = f"Система: перенос пропуска {missed_dmy}"
-        width = max(col.values(), default=-1) + 1
-        row = [""] * width
-        for field, value in (
-            ("Child", kid_id), ("Group", group), ("Club", club_name),
-            ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
-            ("Entered date", entered_date),
-            ("Marked by", marker_text),
-        ):
-            if field in col:
-                row[col[field]] = value
-        new_rows.append(row)
-        pg_rows.append((kid_id, group, extra_dmy, entered_date, marker_text))
 
-    if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
-    for kid_id, group, extra_dmy, entered_date, marker_text in pg_rows:
         pg_dual_write.insert_club_payment_log(kid_id, group, club_name, extra_dmy, extra_dmy, "0", entered_date, marker_text)
 
 
@@ -924,51 +669,16 @@ def delete_club_payment_log_entry(row_id: int) -> dict:
     """Remove one logged club payment and recompute that kid's coverage
     for that same club from what's left.
 
-    Same Phase 4, module 3 dual-path handling as delete_payment_log_entry —
-    row_id is normally a Postgres club_payment_log.id, with a fallback to
-    the old position-based path if nothing matches there."""
-    sh = _sheet()
-    ws = sh.worksheet("Club payment log")
-    values = ws.get_all_values()
-    entries = _parse_club_log_values(values)
+    Phase 5: row_id is a Postgres club_payment_log.id — straight delete by
+    id, no more Sheets/position handling."""
+    entry = pg_dual_write.get_club_payment_log_entry_by_id(row_id)
+    if entry is None:
+        raise ValueError(f"Club payment log row not found: {row_id}")
+    kid_id = entry["child"]
+    club_name = entry["club"]
+    pg_dual_write.delete_club_payment_log_by_id(row_id)
 
-    pg_entry = None
-    try:
-        pg_entry = pg_dual_write.get_club_payment_log_entry_by_id(row_id)
-    except Exception as e:
-        print(f"[phase4] delete_club_payment_log_entry: Postgres lookup failed: {e}")
-
-    if pg_entry is not None:
-        kid_id = pg_entry["child"]
-        club_name = pg_entry["club"]
-        target = next(
-            (e for e in entries if e["child"] == pg_entry["child"] and e["club"] == pg_entry["club"]
-             and e["from"] == pg_entry["from"] and e["until"] == pg_entry["until"]
-             and e["amount"] == pg_entry["amount"] and e["enteredDate"] == pg_entry["enteredDate"]
-             and e["markedBy"] == pg_entry["markedBy"]),
-            None,
-        )
-        if target:
-            ws.delete_rows(target["id"])
-        pg_dual_write.delete_club_payment_log_by_id(row_id)
-        remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name
-                     and (target is None or e["id"] != target["id"])]
-    else:
-        if row_id < 2 or row_id > len(values):
-            raise ValueError(f"Club payment log row not found: {row_id}")
-        target = next((e for e in entries if e["id"] == row_id), None)
-        kid_id = target["child"] if target else ""
-        club_name = target["club"] if target else ""
-        ws.delete_rows(row_id)
-        if target:
-            pg_dual_write.delete_club_payment_log(
-                target["child"], target["club"], target["from"], target["until"],
-                target["amount"], target["enteredDate"], target["markedBy"],
-            )
-        if not kid_id:
-            return {}
-        remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name and e["id"] != row_id]
-
+    remaining = [e for e in pg_dual_write.get_club_payment_log_entries(club_name) if e["child"] == kid_id]
     new_from, new_until = _best_coverage(remaining)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
@@ -1046,55 +756,17 @@ _CHILD_SHEET_TO_PG_COL = {
 }
 
 
-def _child_row_to_pg_dict(full_name: str, row: list, col: dict) -> dict:
-    """Same row + header map sheets_client already has in memory after a
-    write, reshaped into the plain dict pg_dual_write.upsert_child expects."""
-    d = {"full_name": full_name}
-    for sheet_col, pg_col in _CHILD_SHEET_TO_PG_COL.items():
-        idx = col.get(sheet_col)
-        d[pg_col] = (row[idx] if idx is not None and idx < len(row) else "") or ""
-    return d
-
-
 def split_club_names(raw: str) -> list[str]:
     """Accept both "Chess + Swimming" (what the app writes) and "Chess, Swimming"
     (what Ольга might type by hand) as the same list."""
     return [c.strip() for c in re.split(r"[+,]", raw) if c.strip()]
 
 
-_row_cache = {"data": None, "at": 0}
-_ROW_CACHE_TTL = 45  # matches _cache's TTL — reused across a burst of club add/removes
-
-
-def _children_clubs_columns(ws):
-    """Row/column lookup for writing the Clubs cell — cached, because Ольга
-    adding several kids to a club back-to-back was firing one uncached
-    get_all_values() per click and blowing through the Sheets API's
-    per-minute read quota (429s). Row *positions* only change when a child
-    is added/deleted, which invalidate this below — a stale Clubs *value*
-    in the cached snapshot doesn't matter since we only use it for name
-    lookup, not to read the current club list."""
-    now = time.time()
-    if _row_cache["data"] is not None and now - _row_cache["at"] < _ROW_CACHE_TTL:
-        return _row_cache["data"]
-    values = ws.get_all_values()
-    if not values:
-        result = (None, None, None, None, None)
-    else:
-        headers = values[0]
-        col = {h: i for i, h in enumerate(headers)}
-        result = (values, col.get("First name"), col.get("Last name"), col.get("Clubs"), col)
-    _row_cache["data"] = result
-    _row_cache["at"] = now
-    return result
-
-
 def get_all_children_clubs() -> dict[str, list[str]]:
     """child full name -> list of club names, from the (cached) Children data —
-    this is the single source of truth for club membership, both the app and
-    Ольга editing the Clubs column directly end up reading/writing the same cell.
-    Goes through get_children()'s cache instead of its own sheet fetch, so this
-    no longer adds an extra full-sheet read to every /clubs call."""
+    this is the single source of truth for club membership. Goes through
+    get_children()'s cache instead of its own fetch, so this doesn't add an
+    extra read to every /clubs call."""
     return {c["id"]: split_club_names(c["clubs"]) for c in get_children()}
 
 
@@ -1103,20 +775,10 @@ def get_child_clubs(child_id: str) -> list[str]:
 
 
 def _write_child_clubs(child_id: str, club_names: list[str]) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values, first_i, last_i, clubs_i, _ = _children_clubs_columns(ws)
-    if not values or clubs_i is None:
-        return
-    for i, row in enumerate(values[1:], start=2):
-        first = row[first_i] if first_i is not None and first_i < len(row) else ""
-        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
-        if f"{first} {last}".strip() == child_id:
-            joined = " + ".join(club_names)
-            ws.update_cell(i, clubs_i + 1, joined)
-            _cache["at"] = 0  # so the next get_children()/get_all_children_clubs() sees this write
-            pg_dual_write.update_child_clubs(child_id, joined)
-            return
+    """Phase 5: writes straight to Postgres, no Sheets involved."""
+    joined = " + ".join(club_names)
+    pg_dual_write.update_child_clubs(child_id, joined)
+    _cache["at"] = 0  # so the next get_children()/get_all_children_clubs() sees this write
 
 
 def add_child_club(child_id: str, club_name: str) -> None:
@@ -1132,100 +794,52 @@ def remove_child_club(child_id: str, club_name: str) -> None:
 
 
 def update_child(old_id: str, data: dict) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values = ws.get_all_values()
-    if not values:
-        raise ValueError("Children sheet is empty")
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    first_i, last_i = col.get("First name"), col.get("Last name")
-
-    target_row = None
-    for i, row in enumerate(values[1:], start=2):
-        first = row[first_i] if first_i is not None and first_i < len(row) else ""
-        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
-        if f"{first} {last}".strip() == old_id:
-            target_row = i
-            break
-
-    if target_row is None:
+    """Phase 5: writes straight to Postgres, no Sheets involved. full_name
+    is the primary key but can change on rename (data may include new
+    firstName/lastName) — pg_dual_write.rename_child handles that."""
+    existing = pg_dual_write.get_child_full_row(old_id)
+    if existing is None:
         raise ValueError(f"Child not found: {old_id}")
-
-    updated_row = list(row)  # row = the matched sheet row, still bound from the loop above
-    updates = []
+    row = dict(existing)
     for field, col_name in _CHILD_FIELD_MAP.items():
-        col_idx = col.get(col_name)
-        if col_idx is None or field not in data:
+        if field not in data:
             continue
-        cell_value = _cell_val(field, data[field])
-        updates.append({
-            "range": gspread.utils.rowcol_to_a1(target_row, col_idx + 1),
-            "values": [[cell_value]],
-        })
-        while len(updated_row) <= col_idx:
-            updated_row.append("")
-        updated_row[col_idx] = cell_value
-
-    if updates:
-        ws.batch_update(updates)
+        pg_col = _CHILD_SHEET_TO_PG_COL.get(col_name)
+        if pg_col:
+            row[pg_col] = _cell_val(field, data[field])
+    row["full_name"] = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
+    pg_dual_write.rename_child(old_id, row)
     _cache["at"] = 0
-
-    new_first_i, new_last_i = col.get("First name"), col.get("Last name")
-    new_first = updated_row[new_first_i] if new_first_i is not None and new_first_i < len(updated_row) else ""
-    new_last = updated_row[new_last_i] if new_last_i is not None and new_last_i < len(updated_row) else ""
-    new_full_name = f"{new_first} {new_last}".strip()
-    pg_dual_write.rename_child(old_id, _child_row_to_pg_dict(new_full_name, updated_row, col))
 
 
 def add_child(data: dict) -> str:
-    """Append a new child row. Returns the new child's full_name (= its ID)."""
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values = ws.get_all_values()
-    if not values:
-        raise ValueError("Children sheet is empty")
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-
-    new_row = [""] * len(headers)
-    for field, col_name in _CHILD_FIELD_MAP.items():
-        col_idx = col.get(col_name)
-        if col_idx is None or field not in data:
-            continue
-        new_row[col_idx] = _cell_val(field, data[field])
-
-    ws.append_rows([new_row], value_input_option="USER_ENTERED")
-    _cache["at"] = 0
-    _row_cache["at"] = 0
-
+    """Insert a new child directly into Postgres. Returns the new child's
+    full_name (= its id)."""
     fn = str(data.get("firstName", "")).strip()
     ln = str(data.get("lastName", "")).strip()
     full_name = f"{fn} {ln}".strip()
-    if full_name:
-        pg_dual_write.upsert_child(_child_row_to_pg_dict(full_name, new_row, col))
+    if not full_name:
+        return full_name
+
+    row = {pg_col: "" for pg_col in _CHILD_SHEET_TO_PG_COL.values()}
+    row["full_name"] = full_name
+    for field, col_name in _CHILD_FIELD_MAP.items():
+        if field not in data:
+            continue
+        pg_col = _CHILD_SHEET_TO_PG_COL.get(col_name)
+        if pg_col:
+            row[pg_col] = _cell_val(field, data[field])
+
+    pg_dual_write.upsert_child(row)
+    _cache["at"] = 0
     return full_name
 
 
 def delete_child(child_id: str) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Children")
-    values = ws.get_all_values()
-    if not values:
-        raise ValueError("Children sheet is empty")
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    first_i, last_i = col.get("First name"), col.get("Last name")
-    for i, row in enumerate(values[1:], start=2):
-        first = row[first_i] if first_i is not None and first_i < len(row) else ""
-        last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
-        if f"{first} {last}".strip() == child_id:
-            ws.delete_rows(i)
-            _cache["at"] = 0
-            _row_cache["at"] = 0  # deleting a row shifts every row after it
-            pg_dual_write.delete_child(child_id)
-            return
-    raise ValueError(f"Child not found: {child_id}")
+    """Phase 5: writes straight to Postgres, no Sheets involved."""
+    if pg_dual_write.delete_child(child_id) == 0:
+        raise ValueError(f"Child not found: {child_id}")
+    _cache["at"] = 0
 
 
 def get_staff() -> list[dict]:
@@ -1265,83 +879,37 @@ _STAFF_FIELDS = ["Name", "Position", "Contract End", "Phone", "Password", "Rate"
 
 
 def add_staff(data: dict) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Staff")
-    values = ws.get_all_values()
-    headers = values[0] if values else _STAFF_FIELDS
-    col = {h: i for i, h in enumerate(headers)}
-    new_row = [""] * len(headers)
-    for field in _STAFF_FIELDS:
-        idx = col.get(field)
-        if idx is not None:
-            new_row[idx] = str(data.get(field, ""))
-    ws.append_rows([new_row], value_input_option="USER_ENTERED")
+    """Phase 5: writes straight to Postgres, no Sheets involved."""
     name = str(data.get("Name", "")).strip()
-    if name:
-        pg_dual_write.upsert_staff(
-            name, data.get("Position", ""), data.get("Contract End", ""),
-            data.get("Phone", ""), data.get("Password", ""), data.get("Rate", ""),
-        )
+    if not name:
+        raise ValueError("Staff needs a name")
+    pg_dual_write.upsert_staff(
+        name, data.get("Position", ""), data.get("Contract End", ""),
+        data.get("Phone", ""), data.get("Password", ""), data.get("Rate", ""),
+    )
 
 
 def update_staff(old_name: str, data: dict) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Staff")
-    values = ws.get_all_values()
-    if not values:
-        raise ValueError("Staff sheet is empty")
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    name_i = col.get("Name")
-    if name_i is None:
-        raise ValueError("Staff sheet has no Name column")
-    target_row = None
-    for i, row in enumerate(values[1:], start=2):
-        if (row[name_i] if name_i < len(row) else "").strip() == old_name:
-            target_row = i
-            break
-    if target_row is None:
+    """Phase 5: writes straight to Postgres, no Sheets involved. Name is the
+    primary key but can change on rename (data may include a new Name) —
+    pg_dual_write.rename_staff handles that."""
+    existing = pg_dual_write.get_staff_row(old_name)
+    if existing is None:
         raise ValueError(f"Staff not found: {old_name}")
-    updated_row = list(row)  # row = the matched sheet row, still bound from the loop above
-    updates = []
+    merged = dict(existing)
     for field in _STAFF_FIELDS:
-        idx = col.get(field)
-        if idx is not None and field in data:
-            value = str(data[field])
-            updates.append({
-                "range": gspread.utils.rowcol_to_a1(target_row, idx + 1),
-                "values": [[value]],
-            })
-            while len(updated_row) <= idx:
-                updated_row.append("")
-            updated_row[idx] = value
-    if updates:
-        ws.batch_update(updates)
-
-    def _get(field):
-        idx = col.get(field)
-        return updated_row[idx] if idx is not None and idx < len(updated_row) else ""
+        if field in data:
+            merged[field] = str(data[field])
     pg_dual_write.rename_staff(
-        old_name, _get("Name"), _get("Position"), _get("Contract End"),
-        _get("Phone"), _get("Password"), _get("Rate"),
+        old_name, merged["Name"], merged["Position"], merged["Contract End"],
+        merged["Phone"], merged["Password"], merged["Rate"],
     )
 
 
 def delete_staff(name: str) -> None:
-    sh = _sheet()
-    ws = sh.worksheet("Staff")
-    values = ws.get_all_values()
-    if not values:
-        raise ValueError("Staff sheet is empty")
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    name_i = col.get("Name")
-    for i, row in enumerate(values[1:], start=2):
-        if (row[name_i] if name_i is not None and name_i < len(row) else "").strip() == name:
-            ws.delete_rows(i)
-            pg_dual_write.delete_staff(name)
-            return
-    raise ValueError(f"Staff not found: {name}")
+    """Phase 5: writes straight to Postgres, no Sheets involved."""
+    if pg_dual_write.delete_staff(name) == 0:
+        raise ValueError(f"Staff not found: {name}")
 
 
 def get_clubs_from_sheets() -> list[dict]:
