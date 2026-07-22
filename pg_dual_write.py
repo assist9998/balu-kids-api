@@ -182,6 +182,105 @@ def delete_club_payment_log(child, club_name, paid_from, paid_until, amount, ent
     _run("delete_club_payment_log", _do)
 
 
+# ── Phase 4, module 3: payment log / club payment log reads ───────────────────
+# Same raise-don't-swallow contract as the other read functions above. The id
+# these return is Postgres's own serial, NOT a Sheets row position — see
+# delete_payment_log_entry/delete_club_payment_log_entry in sheets_client.py,
+# which look an id up here first and only fall back to treating it as a sheet
+# row position if nothing matches (meaning the read that produced it had
+# itself fallen back to Sheets).
+
+def get_payment_log_entries(child: str) -> list[dict]:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, tariff, paid_from, paid_until, amount, entered_date, marked_by
+                   FROM payment_log WHERE child = %s ORDER BY id""",
+                (child,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [
+        {"id": r[0], "tariff": r[1] or "", "from": r[2] or "", "until": r[3] or "",
+         "amount": r[4] or "", "enteredDate": r[5] or "", "markedBy": r[6] or ""}
+        for r in rows
+    ]
+
+
+def get_payment_log_entry_by_id(pg_id: int) -> dict | None:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT child, tariff, paid_from, paid_until, amount, entered_date, marked_by
+                   FROM payment_log WHERE id = %s""",
+                (pg_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        pool.putconn(conn)
+    if row is None:
+        return None
+    return {"child": row[0] or "", "tariff": row[1] or "", "from": row[2] or "", "until": row[3] or "",
+            "amount": row[4] or "", "enteredDate": row[5] or "", "markedBy": row[6] or ""}
+
+
+def delete_payment_log_by_id(pg_id: int) -> None:
+    _run("delete_payment_log_by_id", lambda cur: cur.execute(
+        "DELETE FROM payment_log WHERE id = %s", (pg_id,)))
+
+
+def get_club_payment_log_entries(club_name: str) -> list[dict]:
+    """Keeps "child" in the result (unlike get_payment_log_entries, which
+    drops it) — the frontend fetches this once per club and filters by
+    child.id on its own side, same as the Sheets-reading fallback path."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, child, paid_from, paid_until, amount, entered_date, marked_by
+                   FROM club_payment_log WHERE club_name = %s ORDER BY id""",
+                (club_name,),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [
+        {"id": r[0], "child": r[1] or "", "from": r[2] or "", "until": r[3] or "",
+         "amount": r[4] or "", "enteredDate": r[5] or "", "markedBy": r[6] or ""}
+        for r in rows
+    ]
+
+
+def get_club_payment_log_entry_by_id(pg_id: int) -> dict | None:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT child, club_name, paid_from, paid_until, amount, entered_date, marked_by
+                   FROM club_payment_log WHERE id = %s""",
+                (pg_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        pool.putconn(conn)
+    if row is None:
+        return None
+    return {"child": row[0] or "", "club": row[1] or "", "from": row[2] or "", "until": row[3] or "",
+            "amount": row[4] or "", "enteredDate": row[5] or "", "markedBy": row[6] or ""}
+
+
+def delete_club_payment_log_by_id(pg_id: int) -> None:
+    _run("delete_club_payment_log_by_id", lambda cur: cur.execute(
+        "DELETE FROM club_payment_log WHERE id = %s", (pg_id,)))
+
+
 # ── Staff ─────────────────────────────────────────────────────────────────────
 
 def upsert_staff(name, position, contract_end, phone, password, rate) -> None:

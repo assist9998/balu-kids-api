@@ -472,7 +472,15 @@ def _parse_log_values(values: list) -> list[dict]:
 def get_payment_log(kid_id: str) -> list[dict]:
     """Every logged payment for one child — an append-only history, so
     short-term kids' separate visits (with gaps between) each keep their
-    own row instead of collapsing into a single from/until pair."""
+    own row instead of collapsing into a single from/until pair.
+
+    Phase 4, module 3: tries Postgres first (id here is then Postgres's own
+    serial, not a sheet row position — see delete_payment_log_entry, which
+    handles both cases), falls back to Sheets on any failure."""
+    try:
+        return pg_dual_write.get_payment_log_entries(kid_id)
+    except Exception as e:
+        print(f"[phase4] get_payment_log: Postgres read failed, falling back to Sheets: {e}")
     sh = _sheet()
     values = sh.worksheet("Payment log").get_all_values()
     return [{k: v for k, v in e.items() if k != "child"}
@@ -690,25 +698,53 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
 
 def delete_payment_log_entry(row_id: int) -> dict:
     """Remove one logged payment (a manager correcting a mistake) and
-    recompute the owning child's cached coverage from what's left."""
+    recompute the owning child's cached coverage from what's left.
+
+    Phase 4, module 3: row_id is normally a Postgres payment_log.id now
+    (get_payment_log reads from there — see above). Look it up by that id
+    first; the matching sheet row is found by full content, never by
+    position. Falls back to the pre-Phase-4 position-based path only if
+    nothing matches in Postgres, meaning the read that produced this id had
+    itself fallen back to Sheets (row_id is then a real sheet position)."""
     sh = _sheet()
     ws = sh.worksheet("Payment log")
     values = ws.get_all_values()
-    if row_id < 2 or row_id > len(values):
-        raise ValueError(f"Payment log row not found: {row_id}")
     entries = _parse_log_values(values)
-    target = next((e for e in entries if e["id"] == row_id), None)
-    kid_id = target["child"] if target else ""
-    ws.delete_rows(row_id)
-    if target:
-        pg_dual_write.delete_payment_log(
-            target["child"], target["tariff"], target["from"], target["until"],
-            target["amount"], target["enteredDate"], target["markedBy"],
-        )
-    if not kid_id:
-        return {}
 
-    remaining = [e for e in entries if e["child"] == kid_id and e["id"] != row_id]
+    pg_entry = None
+    try:
+        pg_entry = pg_dual_write.get_payment_log_entry_by_id(row_id)
+    except Exception as e:
+        print(f"[phase4] delete_payment_log_entry: Postgres lookup failed: {e}")
+
+    if pg_entry is not None:
+        kid_id = pg_entry["child"]
+        target = next(
+            (e for e in entries if e["child"] == pg_entry["child"] and e["tariff"] == pg_entry["tariff"]
+             and e["from"] == pg_entry["from"] and e["until"] == pg_entry["until"]
+             and e["amount"] == pg_entry["amount"] and e["enteredDate"] == pg_entry["enteredDate"]
+             and e["markedBy"] == pg_entry["markedBy"]),
+            None,
+        )
+        if target:
+            ws.delete_rows(target["id"])
+        pg_dual_write.delete_payment_log_by_id(row_id)
+        remaining = [e for e in entries if e["child"] == kid_id and (target is None or e["id"] != target["id"])]
+    else:
+        if row_id < 2 or row_id > len(values):
+            raise ValueError(f"Payment log row not found: {row_id}")
+        target = next((e for e in entries if e["id"] == row_id), None)
+        kid_id = target["child"] if target else ""
+        ws.delete_rows(row_id)
+        if target:
+            pg_dual_write.delete_payment_log(
+                target["child"], target["tariff"], target["from"], target["until"],
+                target["amount"], target["enteredDate"], target["markedBy"],
+            )
+        if not kid_id:
+            return {}
+        remaining = [e for e in entries if e["child"] == kid_id and e["id"] != row_id]
+
     new_from, new_until = _best_coverage(remaining)
     children_values = sh.worksheet("Children").get_all_values()
     _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
@@ -747,7 +783,15 @@ def get_club_payment_log(club_name: str) -> list[dict]:
     """Every logged payment for one club, across all its members — the
     frontend fetches this once per club and derives each kid's own
     paid-through date from it client-side, since nothing here is cached
-    on the Children sheet (a kid's other club may have a different date)."""
+    on the Children sheet (a kid's other club may have a different date).
+
+    Phase 4, module 3: same Postgres-first-with-fallback treatment as
+    get_payment_log — see delete_club_payment_log_entry for how the id this
+    returns is handled either way."""
+    try:
+        return pg_dual_write.get_club_payment_log_entries(club_name)
+    except Exception as e:
+        print(f"[phase4] get_club_payment_log: Postgres read failed, falling back to Sheets: {e}")
     sh = _sheet()
     values = sh.worksheet("Club payment log").get_all_values()
     return [{k: v for k, v in e.items() if k != "club"}
@@ -867,26 +911,53 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
 
 def delete_club_payment_log_entry(row_id: int) -> dict:
     """Remove one logged club payment and recompute that kid's coverage
-    for that same club from what's left."""
+    for that same club from what's left.
+
+    Same Phase 4, module 3 dual-path handling as delete_payment_log_entry —
+    row_id is normally a Postgres club_payment_log.id, with a fallback to
+    the old position-based path if nothing matches there."""
     sh = _sheet()
     ws = sh.worksheet("Club payment log")
     values = ws.get_all_values()
-    if row_id < 2 or row_id > len(values):
-        raise ValueError(f"Club payment log row not found: {row_id}")
     entries = _parse_club_log_values(values)
-    target = next((e for e in entries if e["id"] == row_id), None)
-    kid_id = target["child"] if target else ""
-    club_name = target["club"] if target else ""
-    ws.delete_rows(row_id)
-    if target:
-        pg_dual_write.delete_club_payment_log(
-            target["child"], target["club"], target["from"], target["until"],
-            target["amount"], target["enteredDate"], target["markedBy"],
-        )
-    if not kid_id:
-        return {}
 
-    remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name and e["id"] != row_id]
+    pg_entry = None
+    try:
+        pg_entry = pg_dual_write.get_club_payment_log_entry_by_id(row_id)
+    except Exception as e:
+        print(f"[phase4] delete_club_payment_log_entry: Postgres lookup failed: {e}")
+
+    if pg_entry is not None:
+        kid_id = pg_entry["child"]
+        club_name = pg_entry["club"]
+        target = next(
+            (e for e in entries if e["child"] == pg_entry["child"] and e["club"] == pg_entry["club"]
+             and e["from"] == pg_entry["from"] and e["until"] == pg_entry["until"]
+             and e["amount"] == pg_entry["amount"] and e["enteredDate"] == pg_entry["enteredDate"]
+             and e["markedBy"] == pg_entry["markedBy"]),
+            None,
+        )
+        if target:
+            ws.delete_rows(target["id"])
+        pg_dual_write.delete_club_payment_log_by_id(row_id)
+        remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name
+                     and (target is None or e["id"] != target["id"])]
+    else:
+        if row_id < 2 or row_id > len(values):
+            raise ValueError(f"Club payment log row not found: {row_id}")
+        target = next((e for e in entries if e["id"] == row_id), None)
+        kid_id = target["child"] if target else ""
+        club_name = target["club"] if target else ""
+        ws.delete_rows(row_id)
+        if target:
+            pg_dual_write.delete_club_payment_log(
+                target["child"], target["club"], target["from"], target["until"],
+                target["amount"], target["enteredDate"], target["markedBy"],
+            )
+        if not kid_id:
+            return {}
+        remaining = [e for e in entries if e["child"] == kid_id and e["club"] == club_name and e["id"] != row_id]
+
     new_from, new_until = _best_coverage(remaining)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
