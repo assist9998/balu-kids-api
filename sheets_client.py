@@ -135,16 +135,27 @@ def _rows_as_dicts(values: list[list[str]]) -> list[dict]:
 
 
 def get_children() -> list[dict]:
+    """Phase 4, module 4 (the last and most central one — see
+    project_sheets_to_postgres_migration): tries Postgres first for both the
+    Children rows and the Attendance rows compute_rate needs, falling back
+    to the exact old Sheets reads on any failure. Everything below this
+    point — every derived field — runs unchanged regardless of which source
+    provided the raw rows."""
     now = time.time()
     if _cache["children"] is not None and now - _cache["at"] < _CACHE_TTL:
         return _cache["children"]
 
-    sh = _sheet()
-    child_rows = _rows_as_dicts(sh.worksheet("Children").get_all_values())
     try:
-        attendance_rows = _rows_as_dicts(sh.worksheet("Attendance").get_all_values())
-    except gspread.WorksheetNotFound:
-        attendance_rows = []
+        child_rows = pg_dual_write.read_children_rows()
+        attendance_rows = pg_dual_write.read_attendance_rows_for_rate()
+    except Exception as e:
+        print(f"[phase4] get_children: Postgres read failed, falling back to Sheets: {e}")
+        sh = _sheet()
+        child_rows = _rows_as_dicts(sh.worksheet("Children").get_all_values())
+        try:
+            attendance_rows = _rows_as_dicts(sh.worksheet("Attendance").get_all_values())
+        except gspread.WorksheetNotFound:
+            attendance_rows = []
 
     children = []
     for row in child_rows:
@@ -1219,13 +1230,21 @@ def delete_child(child_id: str) -> None:
 
 def get_staff() -> list[dict]:
     """Read from Staff sheet. Columns: Name, Position, Contract End, Phone, Password.
-    Returns password too — caller must strip it before sending to the frontend."""
-    sh = _sheet()
+    Returns password too — caller must strip it before sending to the frontend
+    (this also feeds /auth/login's password check directly).
+
+    Phase 4, module 4: tries Postgres first, falls back to Sheets on any
+    failure — same treatment as get_children."""
     try:
-        ws = sh.worksheet("Staff")
-    except gspread.WorksheetNotFound:
-        return []
-    rows = _rows_as_dicts(ws.get_all_values())
+        rows = pg_dual_write.read_staff_rows()
+    except Exception as e:
+        print(f"[phase4] get_staff: Postgres read failed, falling back to Sheets: {e}")
+        sh = _sheet()
+        try:
+            ws = sh.worksheet("Staff")
+        except gspread.WorksheetNotFound:
+            return []
+        rows = _rows_as_dicts(ws.get_all_values())
     result = []
     for r in rows:
         name = str(r.get("Name", "")).strip()

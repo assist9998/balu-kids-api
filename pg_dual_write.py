@@ -10,6 +10,7 @@ keeps running in parallel and self-heals any drift a bug here might cause.
 import os
 
 import psycopg2
+import psycopg2.extras
 import psycopg2.pool
 
 _PG_DSN = os.environ.get("BALU_PG_DSN")
@@ -361,3 +362,69 @@ def read_club_attendance_history(club_name: str, child: str) -> dict:
     finally:
         pool.putconn(conn)
     return {date: ("present" if (status or "").strip().lower() == "present" else "absent") for date, status in rows}
+
+
+# ── Phase 4, module 4: children / attendance-for-rate / staff ──────────────────
+# These return rows shaped exactly like sheets_client._rows_as_dicts() output
+# for the corresponding Sheet — a dict keyed by the Sheet's own header names
+# (via SQL column aliases below) — so get_children()/get_staff()'s existing
+# derivation code (_group_id, _contract, _yn, _yn3, compute_rate, ...) runs
+# completely unchanged on top of either source. Highest-centrality reads in
+# the app (get_children feeds nearly every screen, get_staff feeds login) —
+# done last and most carefully, per the phased plan.
+
+def read_children_rows() -> list[dict]:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    first_name AS "First name", last_name AS "Last name", birthday AS "Birthday",
+                    "group" AS "Group", contract_type AS "Contract type", day_type AS "Day type",
+                    price AS "Price", paid_from AS "Paid from", paid_until AS "Paid until",
+                    start_date AS "Start date", meals_included AS "Meals included",
+                    nap_time AS "Nap time", after_school AS "After school", deposit AS "Deposit",
+                    clubs AS "Clubs", club_payment_type AS "Club payment type",
+                    allergies AS "Allergies / notes", paracetamol AS "Paracetamol",
+                    photo_consent AS "Using Photos for Media", parent1_name AS "Parent name (1)",
+                    parent1_phone AS "Parent contact (1)", parent2_name AS "Parent name (2)",
+                    parent2_phone AS "Parent contact (2)", address AS "Address",
+                    adaptation AS "Adaptation", status AS "Status"
+                FROM children ORDER BY full_name
+            """)
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [dict(r) for r in rows]
+
+
+def read_attendance_rows_for_rate() -> list[dict]:
+    """Just the two columns compute_rate actually reads, for every row in
+    the table (it filters by child itself) — shaped like
+    _rows_as_dicts()'s Attendance output."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""SELECT child AS "Child", date AS "Date", status AS "Status" FROM attendance""")
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [dict(r) for r in rows]
+
+
+def read_staff_rows() -> list[dict]:
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT name AS "Name", position AS "Position", contract_end AS "Contract End",
+                       phone AS "Phone", password AS "Password", rate AS "Rate"
+                FROM staff ORDER BY name
+            """)
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [dict(r) for r in rows]
