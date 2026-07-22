@@ -10,38 +10,54 @@ keeps running in parallel and self-heals any drift a bug here might cause.
 import os
 
 import psycopg2
+import psycopg2.pool
 
 _PG_DSN = os.environ.get("BALU_PG_DSN")
-_conn = None
+_pool = None
+
+# FastAPI dispatches every route here as a plain `def`, not `async def`, so
+# Starlette runs them on its threadpool — concurrent requests are genuinely
+# concurrent OS threads (see the delta-save race we fixed earlier for the
+# exact same reason on the Sheets side). A single shared psycopg2 connection
+# is not safe for that: two threads issuing execute() at the same moment on
+# one connection can interleave on the wire and corrupt the session. A pool
+# hands each caller its own connection for the duration of one _run() call,
+# same fix already proven on Gorizont's dual-write layer (pg_sync.py).
 
 
-def _connection():
-    global _conn
+def _get_pool():
+    global _pool
     if not _PG_DSN:
         return None
-    if _conn is None or _conn.closed:
+    if _pool is None:
         try:
-            _conn = psycopg2.connect(_PG_DSN, connect_timeout=5)
+            _pool = psycopg2.pool.ThreadedConnectionPool(1, 10, _PG_DSN, connect_timeout=5)
         except Exception as e:
-            print(f"[pg_dual_write] connect failed: {e}")
+            print(f"[pg_dual_write] pool init failed: {e}")
             return None
-    return _conn
+    return _pool
 
 
 def _run(label, fn):
-    conn = _connection()
-    if conn is None:
+    pool = _get_pool()
+    if pool is None:
         return
+    conn = None
     try:
+        conn = pool.getconn()
         with conn.cursor() as cur:
             fn(cur)
         conn.commit()
     except Exception as e:
         print(f"[pg_dual_write] {label} failed: {e}")
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            pool.putconn(conn)
 
 
 # ── Children ──────────────────────────────────────────────────────────────────
