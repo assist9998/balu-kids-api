@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 
+import pg_dual_write
+
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -290,9 +292,10 @@ def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
         if d == date and c:
             existing_row_for[c] = i
 
-    updates, appends = [], []
+    updates, appends, labels = [], [], {}
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
+        labels[name] = label
         if name in existing_row_for:
             row_i = existing_row_for[name]
             updates.append({
@@ -320,6 +323,9 @@ def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+    for name, label in labels.items():
+        pg_dual_write.upsert_attendance(date, name, groups.get(name, ""), label, marked_by)
 
     _apply_day_carryover(date, statuses)
 
@@ -362,9 +368,10 @@ def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by:
         if d == date and c:
             existing_row_for[c] = i
 
-    updates, appends = [], []
+    updates, appends, labels = [], [], {}
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
+        labels[name] = label
         if name in existing_row_for:
             row_i = existing_row_for[name]
             updates.append({
@@ -390,6 +397,9 @@ def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by:
         ws.batch_update(updates)
     if appends:
         ws.append_rows(appends, value_input_option="USER_ENTERED")
+
+    for name, label in labels.items():
+        pg_dual_write.upsert_club_attendance(club_name, date, name, label, marked_by)
 
     _apply_club_day_carryover(club_name, date, statuses)
 
@@ -531,22 +541,25 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
     group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
+    entered_date = datetime.now().strftime("%d.%m.%Y")
     width = max(col.values(), default=-1) + 1
     new_row = [""] * width
     for field, value in (
         ("Child", kid_id), ("Group", group), ("Tariff", tariff),
         ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
-        ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+        ("Amount", amount), ("Entered date", entered_date),
         ("Marked by", marked_by),
     ):
         if field in col:
             new_row[col[field]] = value
     ws.append_rows([new_row], value_input_option="USER_ENTERED")
+    pg_dual_write.insert_payment_log(kid_id, group, tariff, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
 
     existing = [e for e in _parse_log_values(values) if e["child"] == kid_id]
     existing.append({"from": new_from_dmy, "until": new_until_dmy})
     new_from, new_until = _best_coverage(existing)
     _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+    pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
@@ -589,6 +602,7 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
     children_values = sh.worksheet("Children").get_all_values()
 
     new_rows = []
+    pg_rows = []  # mirrors new_rows for the Postgres dual-write, since it needs plain values, not column indices
     coverage_updates = {}  # kid_id -> (new_from, new_until), applied after the log is written
     for kid_id in absent_kids:
         _, child_row, ccol = _find_child_row(children_values, kid_id)
@@ -616,25 +630,31 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
         group_i = ccol.get("Group")
         group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
 
+        entered_date = datetime.now().strftime("%d.%m.%Y")
+        marker_text = f"Система: перенос пропуска {missed_dmy}"
         width = max(col.values(), default=-1) + 1
         row = [""] * width
         for field, value in (
             ("Child", kid_id), ("Group", group), ("Tariff", _COMPENSATION_TARIFF),
             ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
-            ("Entered date", datetime.now().strftime("%d.%m.%Y")),
-            ("Marked by", f"Система: перенос пропуска {missed_dmy}"),
+            ("Entered date", entered_date),
+            ("Marked by", marker_text),
         ):
             if field in col:
                 row[col[field]] = value
         new_rows.append(row)
+        pg_rows.append((kid_id, group, extra_dmy, entered_date, marker_text))
 
         kid_entries.append({"from": extra_dmy, "until": extra_dmy})
         coverage_updates[kid_id] = _best_coverage(kid_entries)
 
     if new_rows:
         ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    for kid_id, group, extra_dmy, entered_date, marker_text in pg_rows:
+        pg_dual_write.insert_payment_log(kid_id, group, _COMPENSATION_TARIFF, extra_dmy, extra_dmy, "0", entered_date, marker_text)
     for kid_id, (new_from, new_until) in coverage_updates.items():
         _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+        pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
 
 
 def delete_payment_log_entry(row_id: int) -> dict:
@@ -649,6 +669,11 @@ def delete_payment_log_entry(row_id: int) -> dict:
     target = next((e for e in entries if e["id"] == row_id), None)
     kid_id = target["child"] if target else ""
     ws.delete_rows(row_id)
+    if target:
+        pg_dual_write.delete_payment_log(
+            target["child"], target["tariff"], target["from"], target["until"],
+            target["amount"], target["enteredDate"], target["markedBy"],
+        )
     if not kid_id:
         return {}
 
@@ -656,6 +681,7 @@ def delete_payment_log_entry(row_id: int) -> dict:
     new_from, new_until = _best_coverage(remaining)
     children_values = sh.worksheet("Children").get_all_values()
     _write_child_coverage(sh, children_values, kid_id, new_from, new_until)
+    pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
@@ -713,17 +739,19 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
     group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
+    entered_date = datetime.now().strftime("%d.%m.%Y")
     width = max(col.values(), default=-1) + 1
     new_row = [""] * width
     for field, value in (
         ("Child", kid_id), ("Group", group), ("Club", club_name),
         ("Paid from", new_from_dmy), ("Paid until", new_until_dmy),
-        ("Amount", amount), ("Entered date", datetime.now().strftime("%d.%m.%Y")),
+        ("Amount", amount), ("Entered date", entered_date),
         ("Marked by", marked_by),
     ):
         if field in col:
             new_row[col[field]] = value
     ws.append_rows([new_row], value_input_option="USER_ENTERED")
+    pg_dual_write.insert_club_payment_log(kid_id, group, club_name, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
 
     existing = [e for e in _parse_club_log_values(values) if e["child"] == kid_id and e["club"] == club_name]
     existing.append({"from": new_from_dmy, "until": new_until_dmy})
@@ -760,6 +788,7 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
     children_values = sh.worksheet("Children").get_all_values()
 
     new_rows = []
+    pg_rows = []
     for kid_id in absent_kids:
         kid_entries = [e for e in entries if e["child"] == kid_id]
         cov_from, cov_until = _best_coverage(kid_entries)
@@ -784,20 +813,25 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
         group_i = ccol.get("Group")
         group = (child_row[group_i] if child_row and group_i is not None and group_i < len(child_row) else "").strip()
 
+        entered_date = datetime.now().strftime("%d.%m.%Y")
+        marker_text = f"Система: перенос пропуска {missed_dmy}"
         width = max(col.values(), default=-1) + 1
         row = [""] * width
         for field, value in (
             ("Child", kid_id), ("Group", group), ("Club", club_name),
             ("Paid from", extra_dmy), ("Paid until", extra_dmy), ("Amount", "0"),
-            ("Entered date", datetime.now().strftime("%d.%m.%Y")),
-            ("Marked by", f"Система: перенос пропуска {missed_dmy}"),
+            ("Entered date", entered_date),
+            ("Marked by", marker_text),
         ):
             if field in col:
                 row[col[field]] = value
         new_rows.append(row)
+        pg_rows.append((kid_id, group, extra_dmy, entered_date, marker_text))
 
     if new_rows:
         ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    for kid_id, group, extra_dmy, entered_date, marker_text in pg_rows:
+        pg_dual_write.insert_club_payment_log(kid_id, group, club_name, extra_dmy, extra_dmy, "0", entered_date, marker_text)
 
 
 def delete_club_payment_log_entry(row_id: int) -> dict:
@@ -813,6 +847,11 @@ def delete_club_payment_log_entry(row_id: int) -> dict:
     kid_id = target["child"] if target else ""
     club_name = target["club"] if target else ""
     ws.delete_rows(row_id)
+    if target:
+        pg_dual_write.delete_club_payment_log(
+            target["child"], target["club"], target["from"], target["until"],
+            target["amount"], target["enteredDate"], target["markedBy"],
+        )
     if not kid_id:
         return {}
 
@@ -880,6 +919,30 @@ def _cell_val(field: str, value) -> str:
     return str(value) if value is not None else ""
 
 
+_CHILD_SHEET_TO_PG_COL = {
+    "First name": "first_name", "Last name": "last_name", "Birthday": "birthday",
+    "Group": "group", "Contract type": "contract_type", "Day type": "day_type",
+    "Price": "price", "Paid from": "paid_from", "Paid until": "paid_until",
+    "Start date": "start_date", "Meals included": "meals_included", "Nap time": "nap_time",
+    "After school": "after_school", "Deposit": "deposit", "Clubs": "clubs",
+    "Club payment type": "club_payment_type", "Allergies / notes": "allergies",
+    "Paracetamol": "paracetamol", "Using Photos for Media": "photo_consent",
+    "Parent name (1)": "parent1_name", "Parent contact (1)": "parent1_phone",
+    "Parent name (2)": "parent2_name", "Parent contact (2)": "parent2_phone",
+    "Address": "address", "Adaptation": "adaptation", "Status": "status",
+}
+
+
+def _child_row_to_pg_dict(full_name: str, row: list, col: dict) -> dict:
+    """Same row + header map sheets_client already has in memory after a
+    write, reshaped into the plain dict pg_dual_write.upsert_child expects."""
+    d = {"full_name": full_name}
+    for sheet_col, pg_col in _CHILD_SHEET_TO_PG_COL.items():
+        idx = col.get(sheet_col)
+        d[pg_col] = (row[idx] if idx is not None and idx < len(row) else "") or ""
+    return d
+
+
 def split_club_names(raw: str) -> list[str]:
     """Accept both "Chess + Swimming" (what the app writes) and "Chess, Swimming"
     (what Ольга might type by hand) as the same list."""
@@ -936,8 +999,10 @@ def _write_child_clubs(child_id: str, club_names: list[str]) -> None:
         first = row[first_i] if first_i is not None and first_i < len(row) else ""
         last  = row[last_i]  if last_i  is not None and last_i  < len(row) else ""
         if f"{first} {last}".strip() == child_id:
-            ws.update_cell(i, clubs_i + 1, " + ".join(club_names))
+            joined = " + ".join(club_names)
+            ws.update_cell(i, clubs_i + 1, joined)
             _cache["at"] = 0  # so the next get_children()/get_all_children_clubs() sees this write
+            pg_dual_write.update_child_clubs(child_id, joined)
             return
 
 
@@ -974,19 +1039,30 @@ def update_child(old_id: str, data: dict) -> None:
     if target_row is None:
         raise ValueError(f"Child not found: {old_id}")
 
+    updated_row = list(row)  # row = the matched sheet row, still bound from the loop above
     updates = []
     for field, col_name in _CHILD_FIELD_MAP.items():
         col_idx = col.get(col_name)
         if col_idx is None or field not in data:
             continue
+        cell_value = _cell_val(field, data[field])
         updates.append({
             "range": gspread.utils.rowcol_to_a1(target_row, col_idx + 1),
-            "values": [[_cell_val(field, data[field])]],
+            "values": [[cell_value]],
         })
+        while len(updated_row) <= col_idx:
+            updated_row.append("")
+        updated_row[col_idx] = cell_value
 
     if updates:
         ws.batch_update(updates)
     _cache["at"] = 0
+
+    new_first_i, new_last_i = col.get("First name"), col.get("Last name")
+    new_first = updated_row[new_first_i] if new_first_i is not None and new_first_i < len(updated_row) else ""
+    new_last = updated_row[new_last_i] if new_last_i is not None and new_last_i < len(updated_row) else ""
+    new_full_name = f"{new_first} {new_last}".strip()
+    pg_dual_write.rename_child(old_id, _child_row_to_pg_dict(new_full_name, updated_row, col))
 
 
 def add_child(data: dict) -> str:
@@ -1012,7 +1088,10 @@ def add_child(data: dict) -> str:
 
     fn = str(data.get("firstName", "")).strip()
     ln = str(data.get("lastName", "")).strip()
-    return f"{fn} {ln}".strip()
+    full_name = f"{fn} {ln}".strip()
+    if full_name:
+        pg_dual_write.upsert_child(_child_row_to_pg_dict(full_name, new_row, col))
+    return full_name
 
 
 def delete_child(child_id: str) -> None:
@@ -1031,6 +1110,7 @@ def delete_child(child_id: str) -> None:
             ws.delete_rows(i)
             _cache["at"] = 0
             _row_cache["at"] = 0  # deleting a row shifts every row after it
+            pg_dual_write.delete_child(child_id)
             return
     raise ValueError(f"Child not found: {child_id}")
 
@@ -1075,6 +1155,12 @@ def add_staff(data: dict) -> None:
         if idx is not None:
             new_row[idx] = str(data.get(field, ""))
     ws.append_rows([new_row], value_input_option="USER_ENTERED")
+    name = str(data.get("Name", "")).strip()
+    if name:
+        pg_dual_write.upsert_staff(
+            name, data.get("Position", ""), data.get("Contract End", ""),
+            data.get("Phone", ""), data.get("Password", ""), data.get("Rate", ""),
+        )
 
 
 def update_staff(old_name: str, data: dict) -> None:
@@ -1095,16 +1181,29 @@ def update_staff(old_name: str, data: dict) -> None:
             break
     if target_row is None:
         raise ValueError(f"Staff not found: {old_name}")
+    updated_row = list(row)  # row = the matched sheet row, still bound from the loop above
     updates = []
     for field in _STAFF_FIELDS:
         idx = col.get(field)
         if idx is not None and field in data:
+            value = str(data[field])
             updates.append({
                 "range": gspread.utils.rowcol_to_a1(target_row, idx + 1),
-                "values": [[str(data[field])]],
+                "values": [[value]],
             })
+            while len(updated_row) <= idx:
+                updated_row.append("")
+            updated_row[idx] = value
     if updates:
         ws.batch_update(updates)
+
+    def _get(field):
+        idx = col.get(field)
+        return updated_row[idx] if idx is not None and idx < len(updated_row) else ""
+    pg_dual_write.rename_staff(
+        old_name, _get("Name"), _get("Position"), _get("Contract End"),
+        _get("Phone"), _get("Password"), _get("Rate"),
+    )
 
 
 def delete_staff(name: str) -> None:
@@ -1119,6 +1218,7 @@ def delete_staff(name: str) -> None:
     for i, row in enumerate(values[1:], start=2):
         if (row[name_i] if name_i is not None and name_i < len(row) else "").strip() == name:
             ws.delete_rows(i)
+            pg_dual_write.delete_staff(name)
             return
     raise ValueError(f"Staff not found: {name}")
 
