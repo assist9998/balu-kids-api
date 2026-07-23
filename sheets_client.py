@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -306,6 +306,31 @@ def get_club_attendance_history(club_name: str, kid_id: str) -> dict:
     return result
 
 
+# Same hour the end-of-day sweep runs (see main.py's ATTENDANCE_SWEEP_HOUR_BALI
+# — kept here, single source of truth, main.py reads this one).
+ATTENDANCE_SWEEP_HOUR_BALI = 22
+
+
+def _bali_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=8)
+
+
+def _should_defer_carryover(date: str) -> bool:
+    """A mark made *today*, before the day's sweep hour, might still get
+    undone later the same day (a mis-tap corrected a minute later) — so
+    compensating for it immediately would need to be un-done too if that
+    happens. Simpler to just wait: only decide whether today's absence is
+    real once the sweep runs at the end of the day, using whatever the
+    final status turns out to be. A date that isn't today (a manager
+    fixing last week's history) has no "later today" to wait for, so it
+    still compensates immediately, same as before. And a mark made *after*
+    the sweep hour, on the sweep's own day, is past the window this is
+    protecting against (the sweep already ran once for that day) — treat
+    it the old way too rather than silently never compensating it."""
+    bali_now = _bali_now()
+    return date == bali_now.strftime("%Y-%m-%d") and bali_now.hour < ATTENDANCE_SWEEP_HOUR_BALI
+
+
 def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
     """Phase 5: writes straight to Postgres, no Sheets involved — Ольга's
     Attendance sheet is kept current by the push_to_sheets cron instead
@@ -320,7 +345,16 @@ def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
         label = _STATUS_LABEL.get(status, status.capitalize())
         pg_dual_write.upsert_attendance(date, name, groups.get(name, ""), label, marked_by)
 
-    _apply_day_carryover(date, statuses)
+    if not _should_defer_carryover(date):
+        _apply_day_carryover(date, statuses)
+
+
+def run_end_of_day_carryover(date: str) -> None:
+    """Called once by the end-of-day sweep (main.py) — evaluates the
+    *final* attendance for the whole day at once, so a kid marked absent
+    then corrected back to present earlier the same day never generates a
+    compensation row in the first place (see _should_defer_carryover)."""
+    _apply_day_carryover(date, get_attendance(date))
 
 
 def get_club_attendance(club_name: str, date: str) -> dict:
@@ -350,7 +384,14 @@ def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by:
         label = _STATUS_LABEL.get(status, status.capitalize())
         pg_dual_write.upsert_club_attendance(club_name, date, name, label, marked_by)
 
-    _apply_club_day_carryover(club_name, date, statuses)
+    if not _should_defer_carryover(date):
+        _apply_club_day_carryover(club_name, date, statuses)
+
+
+def run_end_of_day_club_carryover(club_name: str, date: str) -> None:
+    """Club-scoped counterpart to run_end_of_day_carryover — same reasoning,
+    called once per club by the end-of-day sweep."""
+    _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date))
 
 
 def _parse_dmy(s: str):

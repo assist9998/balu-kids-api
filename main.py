@@ -101,7 +101,9 @@ def _children_cache_refresh_loop() -> None:
 # once, late in the day, and backfills anyone with no row yet as "absent",
 # attributed to "Система" rather than whichever staff member happened to
 # touch the app last.
-ATTENDANCE_SWEEP_HOUR_BALI = 22  # Asia/Makassar is UTC+8, no DST
+# Kept in sheets_client.py (single source of truth) since _should_defer_carryover
+# there needs the same threshold — this just points at it.
+ATTENDANCE_SWEEP_HOUR_BALI = sheets_client.ATTENDANCE_SWEEP_HOUR_BALI  # Asia/Makassar is UTC+8, no DST
 _SWEEP_CHECK_SECONDS = 600
 _last_attendance_sweep_date: Optional[str] = None
 
@@ -112,6 +114,10 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
     unmarked = {c["id"]: "absent" for c in active if c["id"] not in existing}
     if unmarked:
         sheets_client.upsert_attendance(date, unmarked, "Система")
+    # Whole day's final picture now settled (today's real-time marks were
+    # never immediately compensated, see _should_defer_carryover) — decide
+    # carryover once, here, for everyone absent by the end of the day.
+    sheets_client.run_end_of_day_carryover(date)
 
     kids_by_club = {}
     for c in active:
@@ -125,6 +131,7 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
         unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
         if unmarked_club:
             sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система")
+        sheets_client.run_end_of_day_club_carryover(club.name_en, date)
 
 def _attendance_sweep_loop() -> None:
     global _last_attendance_sweep_date
