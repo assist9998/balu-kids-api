@@ -157,6 +157,14 @@ def _migrate():
         if "club_payments" in tables:
             conn.execute(text("DROP TABLE IF EXISTS club_payments"))
             conn.commit()
+        # transfer (bus escort duty, extra-paid) added to an existing table —
+        # create_all() below only creates missing tables, never ALTERs an
+        # existing one, so this needs its own explicit migration.
+        if "staff_attendance" in tables:
+            existing_cols = {c["name"] for c in inspector.get_columns("staff_attendance")}
+            if "transfer" not in existing_cols:
+                conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN transfer FLOAT DEFAULT 0"))
+                conn.commit()
     Base.metadata.create_all(bind=engine)
 
 def _seed_clubs(db: Session):
@@ -313,12 +321,13 @@ def delete_staff(name: str):
 @app.get("/staff-attendance/{date}")
 def get_staff_attendance(date: str, db: Session = Depends(get_db)):
     rows = db.query(models.StaffAttendance).filter_by(date=date).all()
-    return {r.staff_name: {"status": r.status, "arrival_time": r.arrival_time or "", "note": r.note or ""}
+    return {r.staff_name: {"status": r.status, "arrival_time": r.arrival_time or "", "note": r.note or "",
+                           "transfer": r.transfer or 0}
             for r in rows}
 
 class StaffAttendanceIn(BaseModel):
     date:    str
-    records: dict  # {name: {status, arrival_time?, note?}}
+    records: dict  # {name: {status, arrival_time?, note?, transfer?}} — transfer: 0 | 0.5 | 1
 
 @app.post("/staff-attendance")
 def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)):
@@ -329,6 +338,7 @@ def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)
             status=rec.get("status", "present"),
             arrival_time=rec.get("arrival_time") or None,
             note=rec.get("note") or None,
+            transfer=float(rec.get("transfer", 0) or 0),
         ))
     db.commit()
     return {"ok": True}
@@ -337,6 +347,7 @@ class StaffAttendanceSingleIn(BaseModel):
     status:       str = "present"
     arrival_time: str = ""
     note:         str = ""
+    transfer:     float = 0  # 0 = none, 0.5 = half day, 1 = full day
 
 @app.put("/staff-attendance/{date}/{staff_name}")
 def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttendanceSingleIn, db: Session = Depends(get_db)):
@@ -345,9 +356,11 @@ def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttend
         row.status = data.status
         row.arrival_time = data.arrival_time or None
         row.note = data.note or None
+        row.transfer = data.transfer
     else:
         db.add(models.StaffAttendance(date=date, staff_name=staff_name,
-            status=data.status, arrival_time=data.arrival_time or None, note=data.note or None))
+            status=data.status, arrival_time=data.arrival_time or None, note=data.note or None,
+            transfer=data.transfer))
     db.commit()
     return {"ok": True}
 
@@ -366,7 +379,8 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
     for r in rows:
         if r.staff_name not in result:
             result[r.staff_name] = {}
-        result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or ""}
+        result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or "",
+                                         "transfer": r.transfer or 0}
     return result
 
 # ── Children ──────────────────────────────────────────────────────────────────

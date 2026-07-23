@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey
 from database import Base
 
 class Group(Base):
@@ -64,3 +64,9 @@ class StaffAttendance(Base):
     status       = Column(String, default="present")  # present/absent/late/sick/day-off/unpaid/extra
     arrival_time = Column(String, nullable=True)  # "09:15" — only set for 'late'
     note         = Column(String, nullable=True)
+    # Bus transfer duty — extra-paid, independent of status (someone can be
+    # "present" and still have done transfer that same day). 0 = no transfer,
+    # 1.0 = full day, 0.5 = half day — matches Ольга's own paper tracking
+    # ("+"/"-"/"#" with a monthly total like "18 and half days"), just summed
+    # automatically instead of by hand.
+    transfer     = Column(Float, default=0)
