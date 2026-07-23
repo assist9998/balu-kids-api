@@ -61,7 +61,7 @@ class StaffAttendance(Base):
     id           = Column(Integer, primary_key=True, autoincrement=True)
     date         = Column(String)   # "YYYY-MM-DD"
     staff_name   = Column(String)   # "First Last" from Sheets Staff tab
-    status       = Column(String, default="present")  # present/absent/late/sick/day-off
+    status       = Column(String, default="present")  # present/half-day/absent/late/sick/day-off
     arrival_time = Column(String, nullable=True)  # "09:15" — only set for 'late'
     note         = Column(String, nullable=True)
     # Bus transfer duty — extra-paid, independent of status (someone can be
