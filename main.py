@@ -172,6 +172,9 @@ def _migrate():
             if "transfer" not in existing_cols:
                 conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN transfer FLOAT DEFAULT 0"))
                 conn.commit()
+            if "extra" not in existing_cols:
+                conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN extra BOOLEAN DEFAULT 0"))
+                conn.commit()
     Base.metadata.create_all(bind=engine)
 
 def _seed_clubs(db: Session):
@@ -287,12 +290,20 @@ class StaffIn(BaseModel):
     password:    str = ""
     rate:        str = ""
 
+# Utility logins, not real staff to track attendance/contracts/salary for —
+# Ольга ("director") can't sensibly mark her own attendance, and Alexander
+# ("developer") only has a Staff-sheet row so he can log in at all. Filtered
+# out here so every screen that calls GET /staff (Team, Journal, Schedule,
+# Monthly) stays clean automatically, without each one remembering to do it.
+_NON_TRACKED_POSITIONS = {"director", "developer"}
+
 @app.get("/staff")
 def get_staff():
     staff = sheets_client.get_staff()
     return [{"name": s["name"], "position": s["position"],
              "contractEnd": s["contractEnd"], "phone": s["phone"],
-             "rate": s["rate"]} for s in staff]
+             "rate": s["rate"]} for s in staff
+            if s["position"].strip().lower() not in _NON_TRACKED_POSITIONS]
 
 @app.post("/staff")
 def create_staff(data: StaffIn):
@@ -329,12 +340,12 @@ def delete_staff(name: str):
 def get_staff_attendance(date: str, db: Session = Depends(get_db)):
     rows = db.query(models.StaffAttendance).filter_by(date=date).all()
     return {r.staff_name: {"status": r.status, "arrival_time": r.arrival_time or "", "note": r.note or "",
-                           "transfer": r.transfer or 0}
+                           "transfer": r.transfer or 0, "extra": bool(r.extra)}
             for r in rows}
 
 class StaffAttendanceIn(BaseModel):
     date:    str
-    records: dict  # {name: {status, arrival_time?, note?, transfer?}} — transfer: 0 | 0.5 | 1
+    records: dict  # {name: {status, arrival_time?, note?, transfer?, extra?}} — transfer: 0 | 0.5 | 1
 
 @app.post("/staff-attendance")
 def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)):
@@ -346,6 +357,7 @@ def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)
             arrival_time=rec.get("arrival_time") or None,
             note=rec.get("note") or None,
             transfer=float(rec.get("transfer", 0) or 0),
+            extra=bool(rec.get("extra", False)),
         ))
     db.commit()
     return {"ok": True}
@@ -355,6 +367,7 @@ class StaffAttendanceSingleIn(BaseModel):
     arrival_time: str = ""
     note:         str = ""
     transfer:     float = 0  # 0 = none, 0.5 = half day, 1 = full day
+    extra:        bool = False
 
 @app.put("/staff-attendance/{date}/{staff_name}")
 def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttendanceSingleIn, db: Session = Depends(get_db)):
@@ -364,10 +377,11 @@ def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttend
         row.arrival_time = data.arrival_time or None
         row.note = data.note or None
         row.transfer = data.transfer
+        row.extra = data.extra
     else:
         db.add(models.StaffAttendance(date=date, staff_name=staff_name,
             status=data.status, arrival_time=data.arrival_time or None, note=data.note or None,
-            transfer=data.transfer))
+            transfer=data.transfer, extra=data.extra))
     db.commit()
     return {"ok": True}
 
@@ -387,7 +401,7 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
         if r.staff_name not in result:
             result[r.staff_name] = {}
         result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or "",
-                                         "transfer": r.transfer or 0}
+                                         "transfer": r.transfer or 0, "extra": bool(r.extra)}
     return result
 
 # ── Children ──────────────────────────────────────────────────────────────────

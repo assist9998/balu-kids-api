@@ -61,7 +61,7 @@ class StaffAttendance(Base):
     id           = Column(Integer, primary_key=True, autoincrement=True)
     date         = Column(String)   # "YYYY-MM-DD"
     staff_name   = Column(String)   # "First Last" from Sheets Staff tab
-    status       = Column(String, default="present")  # present/absent/late/sick/day-off/unpaid/extra
+    status       = Column(String, default="present")  # present/absent/late/sick/day-off
     arrival_time = Column(String, nullable=True)  # "09:15" — only set for 'late'
     note         = Column(String, nullable=True)
     # Bus transfer duty — extra-paid, independent of status (someone can be
@@ -70,3 +70,9 @@ class StaffAttendance(Base):
     # ("+"/"-"/"#" with a monthly total like "18 and half days"), just summed
     # automatically instead of by hand.
     transfer     = Column(Float, default=0)
+    # Overtime, same idea as transfer — an "extra" on top of the day's
+    # status rather than a status of its own (someone present *and* running
+    # overtime that day, both true at once; used to be its own status
+    # option, which meant it silently couldn't be shown at the same time as
+    # 'late' — same bug class transfer already avoided by being separate).
+    extra        = Column(Boolean, default=False)
