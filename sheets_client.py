@@ -492,11 +492,18 @@ def _is_day_rate(from_dmy: str, until_dmy: str) -> bool:
     return 0 < (u - f).days + 1 <= _DAY_RATE_MAX_DAYS
 
 
-def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
+def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: str, amount: str,
+                           marked_by: str = "", idempotency_key: str | None = None) -> dict:
     """Append one payment to the log — the manager types the amount they
     actually received, rather than the app computing it, so a pricing bug
     can't misstate what was collected. Returns the child's recomputed
     current coverage.
+
+    idempotency_key: if the client retries this same call (e.g. the app got
+    backgrounded/killed right as the first attempt's response was coming
+    back), the insert is a no-op the second time instead of appending a
+    duplicate payment — coverage below is always recomputed fresh from
+    whatever's actually in the table, so that's correct either way.
 
     Phase 5: writes straight to Postgres, no Sheets involved."""
     summary = pg_dual_write.get_child_summary(kid_id)
@@ -504,7 +511,8 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
     entered_date = datetime.now().strftime("%d.%m.%Y")
-    pg_dual_write.insert_payment_log(kid_id, group, tariff, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
+    pg_dual_write.insert_payment_log(kid_id, group, tariff, new_from_dmy, new_until_dmy, amount, entered_date,
+                                      marked_by, idempotency_key)
 
     existing = pg_dual_write.get_payment_log_entries(kid_id)
     new_from, new_until = _best_coverage(existing)
@@ -638,10 +646,14 @@ def get_club_payment_log(club_name: str) -> list[dict]:
             for e in _parse_club_log_values(values) if e["club"] == club_name]
 
 
-def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str, marked_by: str = "") -> dict:
+def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, until_date: str, amount: str,
+                                marked_by: str = "", idempotency_key: str | None = None) -> dict:
     """Append one club payment. Returns this kid's recomputed coverage for
     *this* club only — never touches Children!Paid from/until, which is
     the garden-only cache.
+
+    idempotency_key: see add_payment_log_entry — a safely-retried duplicate
+    call is a no-op instead of a second payment row.
 
     Phase 5: writes straight to Postgres, no Sheets involved."""
     summary = pg_dual_write.get_child_summary(kid_id)
@@ -649,7 +661,8 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
 
     new_from_dmy, new_until_dmy = _to_dmy(from_date), _to_dmy(until_date)
     entered_date = datetime.now().strftime("%d.%m.%Y")
-    pg_dual_write.insert_club_payment_log(kid_id, group, club_name, new_from_dmy, new_until_dmy, amount, entered_date, marked_by)
+    pg_dual_write.insert_club_payment_log(kid_id, group, club_name, new_from_dmy, new_until_dmy, amount, entered_date,
+                                           marked_by, idempotency_key)
 
     existing = [e for e in pg_dual_write.get_club_payment_log_entries(club_name) if e["child"] == kid_id]
     new_from, new_until = _best_coverage(existing)
@@ -983,3 +996,47 @@ def get_clubs_from_sheets() -> list[dict]:
             "price":   price,
         })
     return clubs
+
+
+_STAFF_ATTENDANCE_HEADER = ["Date", "Staff", "Status", "Arrival time", "Note", "Transfer", "Overtime"]
+
+
+def push_staff_attendance_rows(rows: list[dict]) -> None:
+    """One-way mirror only — StaffAttendance lives in this app's own SQLite
+    (never in Sheets), so unlike everything else in this file there's no
+    read path back from here at all, not even a fallback one. Ольга gets a
+    read-only window onto it; editing always happens in the app.
+
+    This sheet is entirely ours (nothing hand-maintained lives alongside
+    it, unlike Children/Payment log) — but still writes new-data-first,
+    stale-tail-cleared-second, both in one batch_update call, same as
+    push_to_sheets.py. A plain clear() then a separate update() has a real
+    gap between the two network calls: if this process dies or Sheets
+    hiccups in between, Ольга would see an empty sheet (just the header)
+    until the next push happens to succeed, instead of the sheet simply
+    keeping whatever it last had."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Staff attendance")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Staff attendance", rows=1000, cols=len(_STAFF_ATTENDANCE_HEADER))
+        ws.update([_STAFF_ATTENDANCE_HEADER], "A1")
+
+    rows_sorted = sorted(rows, key=lambda r: (r.get("date") or "", r.get("staff_name") or ""))
+    body = [[
+        r.get("date") or "", r.get("staff_name") or "", r.get("status") or "",
+        r.get("arrival_time") or "", r.get("note") or "",
+        (r.get("transfer") or ""), "Yes" if r.get("extra") else "",
+    ] for r in rows_sorted]
+
+    ncols = len(_STAFF_ATTENDANCE_HEADER)
+    new_last_row = 1 + len(body)
+    current_last_row = len(ws.get_all_values())
+    updates = [{"range": f"A1:G{new_last_row}", "values": [_STAFF_ATTENDANCE_HEADER] + body}]
+    if current_last_row > new_last_row:
+        blank_rows = current_last_row - new_last_row
+        updates.append({
+            "range": f"A{new_last_row + 1}:G{current_last_row}",
+            "values": [[""] * ncols for _ in range(blank_rows)],
+        })
+    ws.batch_update(updates)

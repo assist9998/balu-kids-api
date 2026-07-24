@@ -150,6 +150,50 @@ def _attendance_sweep_loop() -> None:
         finally:
             db.close()
 
+# ── Staff attendance -> Sheets mirror ───────────────────────────────────────────
+# StaffAttendance lives only in this app's own SQLite (see database.py) — never
+# in Sheets, unlike everything else here. Ольга asked for a read-only window
+# onto it so she doesn't have to ask someone to check the database. Pushed on
+# a dirty flag rather than a dumb timer: every write endpoint below marks
+# _staff_attendance_dirty, and this loop checks every 30s whether that's set
+# AND at least STAFF_PUSH_MIN_INTERVAL has passed since the last real push —
+# so a quiet stretch does nothing at all, and a burst of edits still only
+# costs one push every 5 minutes, not one per edit.
+_staff_attendance_dirty = False
+_last_staff_push_at = 0.0
+STAFF_PUSH_MIN_INTERVAL = 300  # 5 minutes
+STAFF_PUSH_POLL_SECONDS = 30
+
+def _mark_staff_attendance_dirty():
+    global _staff_attendance_dirty
+    _staff_attendance_dirty = True
+
+def _push_staff_attendance(db: Session) -> None:
+    rows = db.query(models.StaffAttendance).all()
+    sheets_client.push_staff_attendance_rows([
+        {"date": r.date, "staff_name": r.staff_name, "status": r.status,
+         "arrival_time": r.arrival_time, "note": r.note, "transfer": r.transfer, "extra": r.extra}
+        for r in rows
+    ])
+
+def _staff_attendance_push_loop() -> None:
+    global _staff_attendance_dirty, _last_staff_push_at
+    while True:
+        time.sleep(STAFF_PUSH_POLL_SECONDS)
+        if not _staff_attendance_dirty:
+            continue
+        if time.time() - _last_staff_push_at < STAFF_PUSH_MIN_INTERVAL:
+            continue  # edited recently — wait out the cooldown, flag stays set
+        db = SessionLocal()
+        try:
+            _push_staff_attendance(db)
+            _staff_attendance_dirty = False
+            _last_staff_push_at = time.time()
+        except Exception:
+            pass  # Sheets hiccup — flag stays set, next poll retries
+        finally:
+            db.close()
+
 def _migrate():
     inspector = inspect(engine)
     tables = inspector.get_table_names()
@@ -208,6 +252,7 @@ except Exception:
     pass
 threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 threading.Thread(target=_attendance_sweep_loop, daemon=True).start()
+threading.Thread(target=_staff_attendance_push_loop, daemon=True).start()
 
 app = FastAPI()
 
@@ -360,6 +405,7 @@ def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)
             extra=bool(rec.get("extra", False)),
         ))
     db.commit()
+    _mark_staff_attendance_dirty()
     return {"ok": True}
 
 class StaffAttendanceSingleIn(BaseModel):
@@ -383,12 +429,14 @@ def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttend
             status=data.status, arrival_time=data.arrival_time or None, note=data.note or None,
             transfer=data.transfer, extra=data.extra))
     db.commit()
+    _mark_staff_attendance_dirty()
     return {"ok": True}
 
 @app.delete("/staff-attendance/{date}/{staff_name}")
 def delete_single_staff_attendance(date: str, staff_name: str, db: Session = Depends(get_db)):
     db.query(models.StaffAttendance).filter_by(date=date, staff_name=staff_name).delete()
     db.commit()
+    _mark_staff_attendance_dirty()
     return {"ok": True}
 
 @app.get("/staff-attendance-month/{month}")
@@ -598,11 +646,18 @@ class PaymentLogIn(BaseModel):
     dateFrom:  str
     dateUntil: str
     amount:    str
+    # Client-generated, one per confirm-payment tap — lets a safely-retried
+    # request (app backgrounded/killed right as the first attempt's
+    # response was coming back) get recognized as "already recorded"
+    # instead of appending a second row for the same payment. Optional so
+    # an older cached frontend build without this still works.
+    idempotencyKey: str | None = None
 
 @app.post("/payment-log")
 def add_payment_log_entry(data: PaymentLogIn, request: Request):
     coverage = sheets_client.add_payment_log_entry(
-        data.kidId, data.tariff, data.dateFrom, data.dateUntil, data.amount, _marker(request))
+        data.kidId, data.tariff, data.dateFrom, data.dateUntil, data.amount, _marker(request),
+        data.idempotencyKey)
     _refresh_children_cache_async()
     return {"ok": True, **coverage}
 
@@ -729,6 +784,7 @@ class ClubPaymentLogIn(BaseModel):
     dateFrom:  str
     dateUntil: str
     amount:    str
+    idempotencyKey: str | None = None  # see PaymentLogIn.idempotencyKey
 
 @app.post("/club-payment-log")
 def add_club_payment_log_entry(data: ClubPaymentLogIn, request: Request, db: Session = Depends(get_db)):
@@ -736,7 +792,8 @@ def add_club_payment_log_entry(data: ClubPaymentLogIn, request: Request, db: Ses
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
     coverage = sheets_client.add_club_payment_log_entry(
-        data.kidId, club.name_en, data.dateFrom, data.dateUntil, data.amount, _marker(request))
+        data.kidId, club.name_en, data.dateFrom, data.dateUntil, data.amount, _marker(request),
+        data.idempotencyKey)
     return {"ok": True, **coverage}
 
 @app.delete("/club-payment-log/{row_id}")

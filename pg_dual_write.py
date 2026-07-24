@@ -199,22 +199,41 @@ def upsert_club_attendance(club_name: str, date: str, child: str, status: str, m
 # frontend for these (see get_payment_log/get_club_payment_log) — no more
 # Sheets row-position ambiguity to worry about on delete.
 
-def insert_payment_log(child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by) -> None:
-    _write(lambda cur: cur.execute(
-        """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by)))
+def insert_payment_log(child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by,
+                        idempotency_key=None) -> None:
+    # With a key: ON CONFLICT DO NOTHING makes a safely-retried duplicate
+    # call (see add_payment_log_entry) a no-op instead of a second row.
+    # Without one (older caller, or None) — plain insert, unchanged.
+    if idempotency_key:
+        _write(lambda cur: cur.execute(
+            """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (idempotency_key) DO NOTHING""",
+            (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)))
+    else:
+        _write(lambda cur: cur.execute(
+            """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by)))
 
 
 def delete_payment_log_by_id(pg_id: int) -> None:
     _write(lambda cur: cur.execute("DELETE FROM payment_log WHERE id = %s", (pg_id,)))
 
 
-def insert_club_payment_log(child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by) -> None:
-    _write(lambda cur: cur.execute(
-        """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by)))
+def insert_club_payment_log(child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by,
+                             idempotency_key=None) -> None:
+    if idempotency_key:
+        _write(lambda cur: cur.execute(
+            """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (idempotency_key) DO NOTHING""",
+            (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)))
+    else:
+        _write(lambda cur: cur.execute(
+            """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by)))
 
 
 def delete_club_payment_log_by_id(pg_id: int) -> None:
