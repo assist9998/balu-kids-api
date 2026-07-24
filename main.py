@@ -118,7 +118,8 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
     # Whole day's final picture now settled (today's real-time marks were
     # never immediately compensated, see _should_defer_carryover) — decide
     # carryover once, here, for everyone absent by the end of the day.
-    sheets_client.run_end_of_day_carryover(date)
+    for kid_id in sheets_client.run_end_of_day_carryover(date):
+        _add_carryover_feed_item(db, kid_id, date)
 
     kids_by_club = {}
     for c in active:
@@ -132,7 +133,8 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
         unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
         if unmarked_club:
             sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система")
-        sheets_client.run_end_of_day_club_carryover(club.name_en, date)
+        for kid_id in sheets_client.run_end_of_day_club_carryover(club.name_en, date):
+            _add_carryover_feed_item(db, kid_id, date, club_name=club.name_en)
 
 def _attendance_sweep_loop() -> None:
     global _last_attendance_sweep_date
@@ -648,7 +650,10 @@ class ClubAttendanceIn(BaseModel):
 
 @app.post("/club-attendance/{club_id}")
 def save_club_attendance(club_id: int, data: ClubAttendanceIn, request: Request, db: Session = Depends(get_db)):
-    sheets_client.upsert_club_attendance(_club_name(club_id, db), data.date, data.statuses, _marker(request))
+    club_name = _club_name(club_id, db)
+    compensated = sheets_client.upsert_club_attendance(club_name, data.date, data.statuses, _marker(request))
+    for kid_id in compensated:
+        _add_carryover_feed_item(db, kid_id, data.date, club_name=club_name)
     return {"ok": True}
 
 @app.get("/club-attendance-history/{club_id}/{kid_id}")
@@ -666,8 +671,10 @@ class AttendanceIn(BaseModel):
     statuses: dict  # {kid_id: status}
 
 @app.post("/attendance")
-def save_attendance(data: AttendanceIn, request: Request):
-    sheets_client.upsert_attendance(data.date, data.statuses, _marker(request))
+def save_attendance(data: AttendanceIn, request: Request, db: Session = Depends(get_db)):
+    compensated = sheets_client.upsert_attendance(data.date, data.statuses, _marker(request))
+    for kid_id in compensated:
+        _add_carryover_feed_item(db, kid_id, data.date)
     return {"ok": True}
 
 @app.get("/attendance-history/{kid_id}")
@@ -715,6 +722,33 @@ def delete_payment_log_entry(row_id: int):
 def _feed_dict(i):
     return {"id": i.id, "type": i.type, "emoji": i.emoji,
             "ru": i.ru, "en": i.en, "unread": i.unread, "created_at": i.created_at}
+
+def _add_carryover_feed_item(db: Session, kid_id: str, date: str, club_name: str | None = None) -> None:
+    """One feed notification per kid actually compensated by
+    sheets_client's day-carryover (see _apply_day_carryover /
+    _apply_club_day_carryover) — so Ольга sees *why* a paid-until date
+    moved without having to go check the payment log herself. Called from
+    every place that can trigger a carryover: the two real-time save
+    endpoints (when the edit is for a past date / after the sweep hour,
+    see _should_defer_carryover) and the end-of-day sweep."""
+    first = kid_id.split()[0] if kid_id else kid_id
+    try:
+        dmy = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        dmy = date
+    if club_name:
+        club = db.query(models.Club).filter_by(name_en=club_name).first()
+        club_ru = club.name_ru if club else club_name
+        ru = f"{first} пропустил(а) «{club_ru}» {dmy} — оплата продлена на 1 день"
+        en = f"{first} missed {club_name} on {dmy} — payment extended by 1 day"
+    else:
+        ru = f"{first} пропустил(а) сад {dmy} — оплата продлена на 1 день"
+        en = f"{first} missed {dmy} — payment extended by 1 day"
+    db.add(models.FeedItem(
+        type="carryover", emoji="📅", ru=ru, en=en, unread=True,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    ))
+    db.commit()
 
 def _check_birthdays(db: Session):
     """Auto-create birthday feed items for children whose birthday is today."""

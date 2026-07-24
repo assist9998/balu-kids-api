@@ -331,7 +331,7 @@ def _should_defer_carryover(date: str) -> bool:
     return date == bali_now.strftime("%Y-%m-%d") and bali_now.hour < ATTENDANCE_SWEEP_HOUR_BALI
 
 
-def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
+def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> list[str]:
     """Phase 5: writes straight to Postgres, no Sheets involved — Ольга's
     Attendance sheet is kept current by the push_to_sheets cron instead
     (Postgres -> Sheets, ~10 min), not by the app writing it directly."""
@@ -346,15 +346,16 @@ def upsert_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
         pg_dual_write.upsert_attendance(date, name, groups.get(name, ""), label, marked_by)
 
     if not _should_defer_carryover(date):
-        _apply_day_carryover(date, statuses)
+        return _apply_day_carryover(date, statuses)
+    return []
 
 
-def run_end_of_day_carryover(date: str) -> None:
+def run_end_of_day_carryover(date: str) -> list[str]:
     """Called once by the end-of-day sweep (main.py) — evaluates the
     *final* attendance for the whole day at once, so a kid marked absent
     then corrected back to present earlier the same day never generates a
     compensation row in the first place (see _should_defer_carryover)."""
-    _apply_day_carryover(date, get_attendance(date))
+    return _apply_day_carryover(date, get_attendance(date))
 
 
 def get_club_attendance(club_name: str, date: str) -> dict:
@@ -378,20 +379,21 @@ def get_club_attendance(club_name: str, date: str) -> dict:
     return result
 
 
-def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "") -> None:
+def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "") -> list[str]:
     """Phase 5: writes straight to Postgres — see upsert_attendance."""
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
         pg_dual_write.upsert_club_attendance(club_name, date, name, label, marked_by)
 
     if not _should_defer_carryover(date):
-        _apply_club_day_carryover(club_name, date, statuses)
+        return _apply_club_day_carryover(club_name, date, statuses)
+    return []
 
 
-def run_end_of_day_club_carryover(club_name: str, date: str) -> None:
+def run_end_of_day_club_carryover(club_name: str, date: str) -> list[str]:
     """Club-scoped counterpart to run_end_of_day_carryover — same reasoning,
     called once per club by the end-of-day sweep."""
-    _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date))
+    return _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date))
 
 
 def _parse_dmy(s: str):
@@ -523,11 +525,16 @@ def add_payment_log_entry(kid_id: str, tariff: str, from_date: str, until_date: 
 _COMPENSATION_TARIFF = "compensation"
 
 
-def _apply_day_carryover(date: str, statuses: dict) -> None:
+def _apply_day_carryover(date: str, statuses: dict) -> list[str]:
     """A kid on a per-day plan (see _is_day_rate) who's marked absent on a
     weekday inside their already-paid window doesn't lose that day — this
     logs a zero-amount 'compensation' row that pushes their coverage
     forward by one day, same as a real payment would.
+
+    Returns the kid_ids that actually got a new compensation row this call
+    (never ones already compensated) — main.py uses this to post a feed
+    notification, so Ольга sees *why* someone's paid-until moved without
+    having to go look at the payment log herself.
 
     Phase 5: reads/writes Postgres directly, no Sheets involved — the
     "Marked by" column ("Система: перенос пропуска <date>") still exists in
@@ -539,14 +546,15 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
     try:
         d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
     except ValueError:
-        return
+        return []
     if d.weekday() >= 5:
-        return
+        return []
     missed_dmy = d.strftime("%d.%m.%Y")
     absent_kids = [kid_id for kid_id, status in statuses.items() if status == "absent"]
     if not absent_kids:
-        return
+        return []
 
+    compensated = []
     for kid_id in absent_kids:
         kid_entries = pg_dual_write.get_payment_log_entries(kid_id)
         cov_from, cov_until = _best_coverage(kid_entries)
@@ -578,6 +586,8 @@ def _apply_day_carryover(date: str, statuses: dict) -> None:
         kid_entries.append({"from": extra_dmy, "until": extra_dmy})
         new_from, new_until = _best_coverage(kid_entries)
         pg_dual_write.update_child_coverage(kid_id, new_from, new_until)
+        compensated.append(kid_id)
+    return compensated
 
 
 def delete_payment_log_entry(row_id: int) -> dict:
@@ -669,7 +679,7 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
-def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None:
+def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list[str]:
     """Same idea as _apply_day_carryover, scoped to one club — a kid on a
     per-day club plan who misses a weekday inside their paid window gets a
     zero-amount 'compensation' row in Club payment log instead of losing
@@ -677,20 +687,24 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
     afterwards (see add_club_payment_log_entry) — the log itself is the
     only source of truth for a kid's per-club coverage.
 
+    Returns the kid_ids actually compensated this call, same as
+    _apply_day_carryover — see there for why.
+
     Phase 5: reads/writes Postgres directly, no Sheets involved."""
     try:
         d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
     except ValueError:
-        return
+        return []
     if d.weekday() >= 5:
-        return
+        return []
     missed_dmy = d.strftime("%d.%m.%Y")
     absent_kids = [kid_id for kid_id, status in statuses.items() if status == "absent"]
     if not absent_kids:
-        return
+        return []
 
     entries = pg_dual_write.get_club_payment_log_entries(club_name)
 
+    compensated = []
     for kid_id in absent_kids:
         kid_entries = [e for e in entries if e["child"] == kid_id]
         cov_from, cov_until = _best_coverage(kid_entries)
@@ -717,6 +731,8 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> None
         marker_text = f"Система: перенос пропуска {missed_dmy}"
 
         pg_dual_write.insert_club_payment_log(kid_id, group, club_name, extra_dmy, extra_dmy, "0", entered_date, marker_text)
+        compensated.append(kid_id)
+    return compensated
 
 
 def delete_club_payment_log_entry(row_id: int) -> dict:
