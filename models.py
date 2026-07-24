@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey, UniqueConstraint
 from database import Base
 
 class Group(Base):
@@ -76,3 +76,13 @@ class StaffAttendance(Base):
     # option, which meant it silently couldn't be shown at the same time as
     # 'late' — same bug class transfer already avoided by being separate).
     extra        = Column(Boolean, default=False)
+
+    # One row per (date, staff) — required for the ON CONFLICT upsert in
+    # main.py's _upsert_staff_attendance_row to have a target at all, and
+    # what stops two near-simultaneous writes for the same day/person (a
+    # double-tap, or the durable queue retrying a call whose first attempt
+    # actually landed) from both inserting instead of the second becoming
+    # an update. Declared here so a brand-new database gets it for free via
+    # create_all(); _migrate() adds it explicitly for a database that
+    # already had this table before this constraint existed.
+    __table_args__ = (UniqueConstraint("date", "staff_name", name="staff_attendance_date_name_uq"),)

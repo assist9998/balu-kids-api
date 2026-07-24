@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from typing import Optional
 from pydantic import BaseModel
 
@@ -184,13 +185,20 @@ def _staff_attendance_push_loop() -> None:
             continue
         if time.time() - _last_staff_push_at < STAFF_PUSH_MIN_INTERVAL:
             continue  # edited recently — wait out the cooldown, flag stays set
+        # Reset *before* the slow Sheets call, not after — _push_staff_attendance
+        # can take a real amount of time, and a write landing while it's still
+        # running would otherwise get its dirty=True silently stomped back to
+        # False by this same iteration's cleanup, even though that write's
+        # data was never actually part of the push that just happened. Reset
+        # here means that write's own dirty=True survives untouched, so the
+        # next poll picks it up instead of losing it.
+        _staff_attendance_dirty = False
         db = SessionLocal()
         try:
             _push_staff_attendance(db)
-            _staff_attendance_dirty = False
             _last_staff_push_at = time.time()
         except Exception:
-            pass  # Sheets hiccup — flag stays set, next poll retries
+            _staff_attendance_dirty = True  # push itself failed — make sure it's retried
         finally:
             db.close()
 
@@ -218,6 +226,18 @@ def _migrate():
                 conn.commit()
             if "extra" not in existing_cols:
                 conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN extra BOOLEAN DEFAULT 0"))
+                conn.commit()
+            # Without this, two concurrent writes for the same (date, staff)
+            # (e.g. the durable queue retrying a request whose first attempt
+            # actually landed, right as a second edit comes in) could each
+            # see "no row yet" and both insert, leaving two rows for the same
+            # day/person — needed for the ON CONFLICT upserts below to have
+            # something to target in the first place.
+            existing_indexes = {ix["name"] for ix in inspector.get_indexes("staff_attendance")}
+            if "staff_attendance_date_name_uq" not in existing_indexes:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX staff_attendance_date_name_uq ON staff_attendance (date, staff_name)"
+                ))
                 conn.commit()
     Base.metadata.create_all(bind=engine)
 
@@ -388,22 +408,49 @@ def get_staff_attendance(date: str, db: Session = Depends(get_db)):
                            "transfer": r.transfer or 0, "extra": bool(r.extra)}
             for r in rows}
 
+def _upsert_staff_attendance_row(db: Session, date: str, staff_name: str, status: str,
+                                  arrival_time: str | None, note: str | None,
+                                  transfer: float, extra: bool) -> None:
+    """One atomic INSERT ... ON CONFLICT (date, staff_name) DO UPDATE, instead
+    of a SELECT to check "does a row exist" followed by a separate INSERT or
+    UPDATE. That select-then-write shape has a real race: two requests for
+    the same (date, staff_name) landing close together (a double-tap, or the
+    durable queue retrying a call whose first attempt actually succeeded but
+    whose response got lost) can both see "no row yet" and both try to
+    INSERT, leaving two rows for what should be a single (date, staff_name)
+    — the unique index added in _migrate() is what makes ON CONFLICT here
+    possible at all."""
+    stmt = sqlite_insert(models.StaffAttendance).values(
+        date=date, staff_name=staff_name, status=status,
+        arrival_time=arrival_time, note=note, transfer=transfer, extra=extra,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["date", "staff_name"],
+        set_={"status": stmt.excluded.status, "arrival_time": stmt.excluded.arrival_time,
+              "note": stmt.excluded.note, "transfer": stmt.excluded.transfer, "extra": stmt.excluded.extra},
+    )
+    db.execute(stmt)
+
 class StaffAttendanceIn(BaseModel):
     date:    str
     records: dict  # {name: {status, arrival_time?, note?, transfer?, extra?}} — transfer: 0 | 0.5 | 1
 
 @app.post("/staff-attendance")
 def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)):
-    db.query(models.StaffAttendance).filter_by(date=data.date).delete()
+    # Upserts only the names actually in this payload — never deletes+
+    # recreates the whole day. The frontend now only ever sends what
+    # actually changed (see StaffDailyScreen.save()), same reasoning as
+    # attendance/club attendance already send deltas: a delete-everything-
+    # for-the-date-then-insert-everyone-back approach meant whoever saved
+    # last silently discarded anyone else's edits to a *different* person
+    # made in between, since it was replaying that saver's own possibly-
+    # stale full-roster snapshot.
     for name, rec in data.records.items():
-        db.add(models.StaffAttendance(
-            date=data.date, staff_name=name,
-            status=rec.get("status", "present"),
-            arrival_time=rec.get("arrival_time") or None,
-            note=rec.get("note") or None,
-            transfer=float(rec.get("transfer", 0) or 0),
-            extra=bool(rec.get("extra", False)),
-        ))
+        _upsert_staff_attendance_row(
+            db, data.date, name, rec.get("status", "present"),
+            rec.get("arrival_time") or None, rec.get("note") or None,
+            float(rec.get("transfer", 0) or 0), bool(rec.get("extra", False)),
+        )
     db.commit()
     _mark_staff_attendance_dirty()
     return {"ok": True}
@@ -417,17 +464,10 @@ class StaffAttendanceSingleIn(BaseModel):
 
 @app.put("/staff-attendance/{date}/{staff_name}")
 def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttendanceSingleIn, db: Session = Depends(get_db)):
-    row = db.query(models.StaffAttendance).filter_by(date=date, staff_name=staff_name).first()
-    if row:
-        row.status = data.status
-        row.arrival_time = data.arrival_time or None
-        row.note = data.note or None
-        row.transfer = data.transfer
-        row.extra = data.extra
-    else:
-        db.add(models.StaffAttendance(date=date, staff_name=staff_name,
-            status=data.status, arrival_time=data.arrival_time or None, note=data.note or None,
-            transfer=data.transfer, extra=data.extra))
+    _upsert_staff_attendance_row(
+        db, date, staff_name, data.status, data.arrival_time or None, data.note or None,
+        data.transfer, data.extra,
+    )
     db.commit()
     _mark_staff_attendance_dirty()
     return {"ok": True}
