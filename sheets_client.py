@@ -403,6 +403,18 @@ def _parse_dmy(s: str):
         return None
 
 
+def _next_business_day(d):
+    """The garden is closed Sat/Sun, so a carried-over make-good day (see
+    _apply_day_carryover) must land on the next day the kid could actually
+    attend, not literally the calendar-next day — cov_until ending on a
+    Friday used to carry over onto Saturday, a day nobody's ever there for.
+    """
+    d = d + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
 def _parse_log_values(values: list) -> list[dict]:
     """Turn raw Payment log sheet rows into dicts, one shared parser so
     get_payment_log and the write paths below don't each re-read the sheet
@@ -458,7 +470,17 @@ def _best_coverage(entries: list[dict]) -> tuple:
     (paid ahead for a period that hasn't started yet). Confirmed live:
     logging month (01.07-31.07) then an isolated day with a gap
     (05.08) used to jump paidFrom to 05.08, making an already-paid
-    "today" inside July read as unpaid."""
+    "today" inside July read as unpaid.
+
+    "Adjacent" allows for a weekend sitting between two entries, not just a
+    literal 1-day gap — a carried-over make-good day now lands on the next
+    business day (see _next_business_day), which can be up to 3 calendar
+    days after the previous entry's until (Fri -> Mon). Without this, that
+    entry would score as its own disconnected island instead of extending
+    the same run, making paidFrom jump forward to the make-good day itself
+    and losing the real start of the child's paid period. A real gap (an
+    unpaid month, say) is always bigger than a single weekend, so this
+    can't accidentally bridge one of those."""
     ranges = []
     for e in entries:
         until = _parse_dmy(e["until"])
@@ -472,7 +494,7 @@ def _best_coverage(entries: list[dict]) -> tuple:
     merged = [ranges[0]]
     for start, until in ranges[1:]:
         last_start, last_until = merged[-1]
-        if start <= last_until + timedelta(days=1):
+        if start <= _next_business_day(last_until):
             merged[-1] = (last_start, max(last_until, until))
         else:
             merged.append((start, until))
@@ -575,7 +597,7 @@ def _apply_day_carryover(date: str, statuses: dict) -> list[str]:
         if already_compensated:
             continue
 
-        extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
+        extra_dmy = _next_business_day(cov_until_d).strftime("%d.%m.%Y")
         summary = pg_dual_write.get_child_summary(kid_id)
         group = summary["group"] if summary else ""
         entered_date = datetime.now().strftime("%d.%m.%Y")
@@ -697,6 +719,16 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list
         return []
     if d.weekday() >= 5:
         return []
+    scheduled_weekdays = _club_scheduled_weekdays(club_name)
+    # A kid marked absent on a day this club doesn't even meet on (a
+    # mis-tap, or historical data from before the club's real schedule was
+    # entered correctly) never warrants compensation — there was no session
+    # to have missed in the first place. Only enforced when the schedule is
+    # actually known (see _club_scheduled_weekdays) so a Sheets hiccup
+    # degrades to the old "any weekday" behavior instead of blocking
+    # legitimate compensation.
+    if scheduled_weekdays and d.weekday() not in scheduled_weekdays:
+        return []
     missed_dmy = d.strftime("%d.%m.%Y")
     absent_kids = [kid_id for kid_id, status in statuses.items() if status == "absent"]
     if not absent_kids:
@@ -724,7 +756,7 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list
         if already_compensated:
             continue
 
-        extra_dmy = (cov_until_d + timedelta(days=1)).strftime("%d.%m.%Y")
+        extra_dmy = _next_club_day(cov_until_d, scheduled_weekdays).strftime("%d.%m.%Y")
         summary = pg_dual_write.get_child_summary(kid_id)
         group = summary["group"] if summary else ""
         entered_date = datetime.now().strftime("%d.%m.%Y")
@@ -1012,6 +1044,63 @@ def get_clubs_from_sheets() -> list[dict]:
             "price":   price,
         })
     return clubs
+
+
+_WEEKDAY_ABBR_EN = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+_WEEKDAY_ABBR_RU = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6}
+
+
+def _parse_club_weekdays(days_str: str) -> set:
+    """'Days' cell from the Clubs sheet, e.g. "Ср / Wed" or "Пн, Ср / Mon, Wed"
+    (or just one side, if there's no "/" at all) -> the actual weekday
+    numbers (Mon=0..Sun=6) this club meets on. Prefers the English half
+    (after "/") since 3-letter abbreviations there are unambiguous; falls
+    back to the Russian half if English didn't match anything (a manually
+    typed cell missing the "/" separator, say)."""
+    if not days_str:
+        return set()
+    parts = days_str.split("/")
+    en_part = parts[1] if len(parts) > 1 else parts[0]
+    result = {_WEEKDAY_ABBR_EN[key] for token in en_part.split(",")
+              if (key := token.strip().lower()[:3]) in _WEEKDAY_ABBR_EN}
+    if result:
+        return result
+    ru_part = parts[0]
+    return {_WEEKDAY_ABBR_RU[key] for token in ru_part.split(",")
+            if (key := token.strip().lower()) in _WEEKDAY_ABBR_RU}
+
+
+def _next_club_day(d, scheduled_weekdays: set):
+    """Next date after d whose weekday the club actually meets on — a
+    make-good day for a missed club session must itself be a day the club
+    runs, not just any non-weekend day (the garden's _next_business_day is
+    the wrong helper here: a kid compensated onto a day their club doesn't
+    even meet on would still just lose the session). Falls back to
+    _next_business_day if scheduled_weekdays is empty (unknown schedule —
+    a Sheets hiccup, say), so this can't loop forever with nothing to
+    match, and degrades to the same behavior as before this fix existed."""
+    if not scheduled_weekdays:
+        return _next_business_day(d)
+    nxt = d + timedelta(days=1)
+    while nxt.weekday() not in scheduled_weekdays:
+        nxt += timedelta(days=1)
+    return nxt
+
+
+def _club_scheduled_weekdays(club_name: str) -> set:
+    """Which weekdays (Mon=0..Sun=6) club_name (the English name) actually
+    meets on, per the live Clubs sheet — empty set if the sheet is
+    unreachable or the club/its Days cell can't be found, so a lookup
+    failure degrades to "don't restrict" rather than silently blocking
+    something that would otherwise have been fine."""
+    try:
+        clubs = get_clubs_from_sheets()
+    except Exception:
+        return set()
+    club = next((c for c in clubs if c["name_en"] == club_name), None)
+    if not club:
+        return set()
+    return _parse_club_weekdays(club["days"])
 
 
 _STAFF_ATTENDANCE_HEADER = ["Date", "Staff", "Status", "Arrival time", "Note", "Transfer", "Overtime"]
