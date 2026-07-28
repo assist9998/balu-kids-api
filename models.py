@@ -86,3 +86,64 @@ class StaffAttendance(Base):
     # create_all(); _migrate() adds it explicitly for a database that
     # already had this table before this constraint existed.
     __table_args__ = (UniqueConstraint("date", "staff_name", name="staff_attendance_date_name_uq"),)
+
+
+class StaffTask(Base):
+    """A recurring or one-off task assigned to one staff member (Ольга: 'мисс
+    Фика каждую пятницу должна скидывать отчёт') — this row is the template;
+    the actual per-occurrence checkboxes the manager taps live in
+    StaffTaskInstance below, generated from this."""
+    __tablename__ = "staff_tasks"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    staff_name = Column(String)
+    title      = Column(String)
+    # 'once'   — a single instance due on start_date.
+    # 'weekly' — one instance per matching weekday (see weekdays) every week,
+    #            from start_date onward (open-ended unless end_date is set).
+    # 'count'  — target_count undated instances (Ольга: "провести три
+    #            мероприятия" — no specific days, just N times before done).
+    recurrence   = Column(String, default="once")
+    weekdays     = Column(String, nullable=True)  # comma-separated 0=Mon..6=Sun, 'weekly' only
+    target_count = Column(Integer, nullable=True)  # 'count' only
+    start_date   = Column(String)            # "YYYY-MM-DD"
+    end_date     = Column(String, nullable=True)  # "YYYY-MM-DD", open-ended if null ('weekly' only)
+    created_at   = Column(String, default="")
+    # Stopping a task (no longer relevant) never deletes its history — same
+    # reasoning as active/inactive elsewhere in this app (children, clubs):
+    # Ольга's monthly summary for past months must keep showing what was
+    # actually asked and done, not quietly lose rows a manager already acted on.
+    archived     = Column(Boolean, default=False)
+    # Same idempotency-key pattern as payment_log — the frontend durably
+    # queues this write (see makeDurableIdempotent), and a blind retry of a
+    # create-task call whose first attempt actually landed must be a no-op,
+    # not a second identical task generating its own duplicate set of
+    # instances alongside the first one's.
+    idempotency_key = Column(String, nullable=True, unique=True)
+
+
+class StaffTaskInstance(Base):
+    """One concrete occurrence of a StaffTask — what the manager actually
+    taps Done/Postponed/Cancelled on.
+
+    due_date/seq deliberately never use SQL NULL, even though only one of
+    them is ever meaningful for a given instance — NULL is never equal to
+    NULL even inside a UNIQUE constraint (confirmed directly: two rows both
+    holding NULL in the same unique column both insert fine, silently
+    defeating the constraint below). So a dated instance (once/weekly)
+    always gets seq=0 (sentinel, unused) instead of NULL, and an undated
+    'count' instance always gets due_date="" (sentinel, unused) instead of
+    NULL — keeping every column in the constraint a real, comparable value
+    is what makes ON CONFLICT actually catch a duplicate-generation retry."""
+    __tablename__ = "staff_task_instances"
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    task_id       = Column(Integer, ForeignKey("staff_tasks.id"))
+    due_date      = Column(String, default="")   # "YYYY-MM-DD", or "" for a 'count' task's instances
+    seq           = Column(Integer, default=0)   # 1-based for a 'count' task's instances, else 0
+    status        = Column(String, default="pending")  # pending/done/postponed/cancelled
+    cancel_reason = Column(String, nullable=True)
+    updated_at    = Column(String, nullable=True)
+
+    # Stops the monthly-generation sweep from creating the same weekly
+    # occurrence twice (e.g. if it runs more than once for the same month —
+    # a restart, a slow poll catching up).
+    __table_args__ = (UniqueConstraint("task_id", "due_date", "seq", name="staff_task_instance_uq"),)

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from pydantic import BaseModel
 
@@ -272,9 +273,70 @@ try:
     _refresh_club_schedule_cache()
 except Exception:
     pass
+# ── Staff tasks (background helpers — endpoints are further down, after
+# app = FastAPI()) ──────────────────────────────────────────────────────────
+TASK_INSTANCE_HORIZON_MONTHS = 2  # generate through "today's month + this many"
+
+def _add_months(d, n: int):
+    year = d.year + (d.month - 1 + n) // 12
+    month = (d.month - 1 + n) % 12 + 1
+    return d.replace(year=year, month=month, day=1)
+
+def _ensure_task_instances(db: Session, task: "models.StaffTask") -> None:
+    """Fills in whatever occurrences of this task don't have a row yet —
+    safe to call repeatedly (on creation, and from the hourly sweep below),
+    since each insert is an idempotent ON CONFLICT DO NOTHING keyed on
+    (task_id, due_date, seq). Weekly generates through
+    TASK_INSTANCE_HORIZON_MONTHS out — an open-ended weekly task can't
+    generate 'all' occurrences up front."""
+    def _upsert(due_date: str, seq: int) -> None:
+        stmt = sqlite_insert(models.StaffTaskInstance).values(
+            task_id=task.id, due_date=due_date, seq=seq, status="pending",
+        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["task_id", "due_date", "seq"])
+        db.execute(stmt)
+
+    if task.recurrence == "once":
+        _upsert(task.start_date, 0)
+    elif task.recurrence == "count":
+        for seq in range(1, (task.target_count or 0) + 1):
+            _upsert("", seq)
+    elif task.recurrence == "weekly":
+        weekdays = {int(x) for x in (task.weekdays or "").split(",") if x != ""}
+        start = datetime.strptime(task.start_date, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        horizon = _add_months(max(start, today), TASK_INSTANCE_HORIZON_MONTHS)
+        end_limit = datetime.strptime(task.end_date, "%Y-%m-%d").date() if task.end_date else horizon
+        stop = min(horizon, end_limit)
+        d = start
+        while d <= stop:
+            if d.weekday() in weekdays:
+                _upsert(d.isoformat(), 0)
+            d += timedelta(days=1)
+    db.commit()
+
+def _staff_task_instance_sweep_loop() -> None:
+    """Tops up 'weekly' tasks' instances as the rolling horizon moves
+    forward — without this, a task created in June would stop showing any
+    occurrences once TASK_INSTANCE_HORIZON_MONTHS ran out, with no further
+    action from anyone to notice or refresh it. Filters out archived tasks
+    so an archived one never grows new future instances (see
+    get_staff_tasks for why its past instances still stay visible though)."""
+    while True:
+        time.sleep(3600)
+        db = SessionLocal()
+        try:
+            for task in db.query(models.StaffTask).filter_by(archived=False, recurrence="weekly").all():
+                _ensure_task_instances(db, task)
+        except Exception:
+            pass
+        finally:
+            db.close()
+
 threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 threading.Thread(target=_attendance_sweep_loop, daemon=True).start()
 threading.Thread(target=_staff_attendance_push_loop, daemon=True).start()
+threading.Thread(target=_staff_task_instance_sweep_loop, daemon=True).start()
 
 app = FastAPI()
 
@@ -492,6 +554,137 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
             result[r.staff_name] = {}
         result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or "",
                                          "transfer": r.transfer or 0, "extra": bool(r.extra)}
+    return result
+
+# ── Staff tasks ───────────────────────────────────────────────────────────────
+# Ольга: a task assigned to one teacher (once, or recurring on given
+# weekdays, or "do this N times" with no fixed dates) — the manager taps
+# Done/Postponed/Cancelled on each occurrence in the app; the teacher
+# themselves reports over Telegram, outside this app entirely.
+
+class StaffTaskIn(BaseModel):
+    staffName:      str
+    title:          str
+    recurrence:     str = "once"  # once | weekly | count
+    weekdays:       list[int] = []  # 0=Mon..6=Sun, 'weekly' only
+    targetCount:    int | None = None  # 'count' only
+    startDate:      str
+    endDate:        str | None = None  # 'weekly' only, open-ended if omitted
+    idempotencyKey: str | None = None
+
+def _task_dict(t: "models.StaffTask") -> dict:
+    return {
+        "id": t.id, "staffName": t.staff_name, "title": t.title, "recurrence": t.recurrence,
+        "weekdays": [int(x) for x in (t.weekdays or "").split(",") if x != ""],
+        "targetCount": t.target_count, "startDate": t.start_date, "endDate": t.end_date,
+    }
+
+def _instance_dict(i: "models.StaffTaskInstance") -> dict:
+    return {
+        "id": i.id, "taskId": i.task_id, "dueDate": i.due_date or None,
+        "seq": i.seq if i.seq else None, "status": i.status, "cancelReason": i.cancel_reason,
+    }
+
+@app.post("/staff-tasks")
+def create_staff_task(data: StaffTaskIn, db: Session = Depends(get_db)):
+    # idempotencyKey: same reasoning as payment_log — the frontend durably
+    # queues this write, and a blind retry of a call whose first attempt
+    # actually landed must return that same task, not create (and
+    # instance-generate) a second identical one.
+    if data.idempotencyKey:
+        existing = db.query(models.StaffTask).filter_by(idempotency_key=data.idempotencyKey).first()
+        if existing:
+            return _task_dict(existing)
+    task = models.StaffTask(
+        staff_name=data.staffName, title=data.title, recurrence=data.recurrence,
+        weekdays=",".join(str(w) for w in data.weekdays) if data.weekdays else None,
+        target_count=data.targetCount, start_date=data.startDate, end_date=data.endDate,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        idempotency_key=data.idempotencyKey,
+    )
+    db.add(task)
+    try:
+        db.commit()
+    except IntegrityError:
+        # two near-simultaneous requests with the same key — the other one
+        # won the race, return its task rather than erroring out
+        db.rollback()
+        existing = db.query(models.StaffTask).filter_by(idempotency_key=data.idempotencyKey).first()
+        if existing:
+            return _task_dict(existing)
+        raise
+    db.refresh(task)
+    _ensure_task_instances(db, task)
+    return _task_dict(task)
+
+@app.get("/staff-tasks/{staff_name}")
+def get_staff_tasks(staff_name: str, month: str, db: Session = Depends(get_db)):
+    """month: "YYYY-MM" — dated (once/weekly) instances are filtered to that
+    month; undated ('count') instances have no month of their own, so they're
+    always included regardless of which month is being viewed.
+
+    Not filtered by archived here — archiving a task only stops the sweep
+    from generating any *further* instances for it (see
+    _staff_task_instance_sweep_loop), it must never make an already-viewed
+    past month quietly lose the task/instances a manager already acted on.
+    A task archived with no instances left in the requested month/scope
+    simply won't appear below on its own, with no special-casing needed."""
+    tasks = db.query(models.StaffTask).filter_by(staff_name=staff_name).all()
+    result = []
+    for t in tasks:
+        instances = db.query(models.StaffTaskInstance).filter_by(task_id=t.id).all()
+        shown = [i for i in instances if (i.due_date or "").startswith(month) or (t.recurrence == "count")]
+        shown.sort(key=lambda i: (i.due_date or "", i.seq or 0))
+        result.append({**_task_dict(t), "instances": [_instance_dict(i) for i in shown]})
+    return result
+
+@app.delete("/staff-tasks/{task_id}")
+def archive_staff_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(models.StaffTask).filter_by(id=task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.archived = True
+    db.commit()
+    return {"ok": True}
+
+class StaffTaskInstanceIn(BaseModel):
+    status:       str  # done | postponed | cancelled | pending
+    cancelReason: str = ""
+
+@app.patch("/staff-task-instances/{instance_id}")
+def update_staff_task_instance(instance_id: int, data: StaffTaskInstanceIn, db: Session = Depends(get_db)):
+    inst = db.query(models.StaffTaskInstance).filter_by(id=instance_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if data.status == "cancelled" and not data.cancelReason.strip():
+        raise HTTPException(status_code=400, detail="cancelReason is required when cancelling")
+    inst.status = data.status
+    inst.cancel_reason = data.cancelReason.strip() if data.status == "cancelled" else None
+    inst.updated_at = datetime.now(timezone.utc).isoformat()
+    db.commit()
+    return _instance_dict(inst)
+
+@app.get("/staff-tasks-summary/{month}")
+def get_staff_tasks_summary(month: str, db: Session = Depends(get_db)):
+    """One row per (staff, task) for the month — counts of done/postponed/
+    cancelled/pending among that task's instances due in this month (a
+    'count' task's undated instances count toward every month, same as
+    get_staff_tasks above, since they have no month of their own).
+
+    Not filtered by archived — same reasoning as get_staff_tasks."""
+    tasks = db.query(models.StaffTask).all()
+    result: dict[str, list] = {}
+    for t in tasks:
+        instances = db.query(models.StaffTaskInstance).filter_by(task_id=t.id).all()
+        shown = [i for i in instances if (i.due_date or "").startswith(month) or (t.recurrence == "count")]
+        if not shown:
+            continue
+        counts = {"done": 0, "postponed": 0, "cancelled": 0, "pending": 0}
+        for i in shown:
+            counts[i.status] = counts.get(i.status, 0) + 1
+        result.setdefault(t.staff_name, []).append({
+            "taskId": t.id, "title": t.title, "total": len(shown), **counts,
+        })
     return result
 
 # ── Children ──────────────────────────────────────────────────────────────────
