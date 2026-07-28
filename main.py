@@ -600,24 +600,19 @@ def create_staff_task(data: StaffTaskIn, db: Session = Depends(get_db)):
     return _task_dict(task)
 
 @app.get("/staff-tasks/{staff_name}")
-def get_staff_tasks(staff_name: str, month: str, db: Session = Depends(get_db)):
-    """month: "YYYY-MM" — dated (once/weekly) instances are filtered to that
-    month; undated ('count') instances have no month of their own, so they're
-    always included regardless of which month is being viewed.
-
-    Not filtered by archived here — archiving a task only stops the sweep
-    from generating any *further* instances for it (see
-    _staff_task_instance_sweep_loop), it must never make an already-viewed
-    past month quietly lose the task/instances a manager already acted on.
-    A task archived with no instances left in the requested month/scope
-    simply won't appear below on its own, with no special-casing needed."""
-    tasks = db.query(models.StaffTask).filter_by(staff_name=staff_name).all()
+def get_staff_tasks(staff_name: str, db: Session = Depends(get_db)):
+    """Every non-archived task for this person, with every one of its
+    instances — Ольга: no point splitting this by month/year, just show
+    the whole running list. Archived here (unlike the monthly summary,
+    which still shows archived tasks for a past month they were relevant
+    in) — this is the live "what does this person currently have on their
+    plate" view, an archived task doesn't belong in it anymore."""
+    tasks = db.query(models.StaffTask).filter_by(staff_name=staff_name, archived=False).all()
     result = []
     for t in tasks:
         instances = db.query(models.StaffTaskInstance).filter_by(task_id=t.id).all()
-        shown = [i for i in instances if (i.due_date or "").startswith(month) or (t.recurrence == "count")]
-        shown.sort(key=lambda i: (i.due_date or "", i.seq or 0))
-        result.append({**_task_dict(t), "instances": [_instance_dict(i) for i in shown]})
+        instances.sort(key=lambda i: (i.due_date or "", i.seq or 0))
+        result.append({**_task_dict(t), "instances": [_instance_dict(i) for i in instances]})
     return result
 
 @app.delete("/staff-tasks/{task_id}")
