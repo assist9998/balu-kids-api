@@ -64,24 +64,6 @@ def _refresh_children_cache_async() -> None:
 def _cached_children(db: Session) -> list[dict]:
     return [json.loads(row.data) for row in db.query(models.ChildCache).all()]
 
-def _refresh_club_schedule_cache() -> None:
-    clubs = sheets_client.get_clubs_from_sheets()
-    db = SessionLocal()
-    try:
-        row = db.query(models.ClubScheduleCache).filter_by(id=1).first()
-        payload = json.dumps(clubs)
-        if row:
-            row.data = payload
-        else:
-            db.add(models.ClubScheduleCache(id=1, data=payload))
-        db.commit()
-    finally:
-        db.close()
-
-def _cached_club_schedule(db: Session) -> list[dict]:
-    row = db.query(models.ClubScheduleCache).filter_by(id=1).first()
-    return json.loads(row.data) if row else []
-
 def _children_cache_refresh_loop() -> None:
     while True:
         time.sleep(CHILDREN_CACHE_REFRESH_SECONDS)
@@ -89,10 +71,6 @@ def _children_cache_refresh_loop() -> None:
             _refresh_children_cache()
         except Exception:
             pass  # Sheets hiccup — next cycle will retry; stale cache beats a crashed thread
-        try:
-            _refresh_club_schedule_cache()
-        except Exception:
-            pass
 
 # ── End-of-day attendance sweep ────────────────────────────────────────────────
 # Kids get an attendance row the moment staff actually mark them (see
@@ -132,9 +110,10 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
             continue
         existing_club = sheets_client.get_club_attendance(club.name_en, date)
         unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
+        scheduled_weekdays = sheets_client._parse_club_weekdays(club.days_en)
         if unmarked_club:
-            sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система")
-        for kid_id in sheets_client.run_end_of_day_club_carryover(club.name_en, date):
+            sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система", scheduled_weekdays)
+        for kid_id in sheets_client.run_end_of_day_club_carryover(club.name_en, date, scheduled_weekdays):
             _add_carryover_feed_item(db, kid_id, date, club_name=club.name_en)
 
 def _attendance_sweep_loop() -> None:
@@ -219,6 +198,13 @@ def _migrate():
         if "club_payments" in tables:
             conn.execute(text("DROP TABLE IF EXISTS club_payments"))
             conn.commit()
+        # club_schedule_cache mirrored the Clubs Sheet's days/time/price into
+        # this app so GET /clubs could override the DB with it — the wrong
+        # direction (Sheets should never be an input). Club's own
+        # days_ru/days_en/time/price columns are the only source now.
+        if "club_schedule_cache" in tables:
+            conn.execute(text("DROP TABLE IF EXISTS club_schedule_cache"))
+            conn.commit()
         # transfer (bus escort duty, extra-paid) added to an existing table —
         # create_all() below only creates missing tables, never ALTERs an
         # existing one, so this needs its own explicit migration.
@@ -269,10 +255,6 @@ try:
     _refresh_children_cache()  # populate before the first request lands
 except Exception:
     pass  # Sheets unreachable at boot — background loop will retry
-try:
-    _refresh_club_schedule_cache()
-except Exception:
-    pass
 # ── Staff tasks (background helpers — endpoints are further down, after
 # app = FastAPI()) ──────────────────────────────────────────────────────────
 TASK_INSTANCE_HORIZON_MONTHS = 2  # generate through "today's month + this many"
@@ -778,9 +760,15 @@ def _club_dict(c, kids):
 
 @app.get("/clubs")
 def get_clubs(db: Session = Depends(get_db)):
+    # models.Club (this app's own SQLite) is the only source for
+    # schedule/price now — it used to be overridden by whatever the Clubs
+    # Sheets tab said, which was backwards: Sheets is supposed to be a
+    # read-only mirror everywhere else in this app (attendance, payments,
+    # staff), and letting it override the DB here meant editing the sheet
+    # was the only way to change a club's schedule at all, with no
+    # guarantee anything reading from the DB directly (e.g. the carryover
+    # weekday check) stayed in sync with it.
     clubs = db.query(models.Club).all()
-    # Merge prices and schedule from the (cached) Clubs sheet (Olga edits there)
-    price_map = {s["name_ru"]: s for s in _cached_club_schedule(db)}
 
     # Membership itself comes from the (cached) Children data's "clubs" field —
     # Sheets is still the real source, this is just the fast local mirror of it.
@@ -789,25 +777,7 @@ def get_clubs(db: Session = Depends(get_db)):
         for name in sheets_client.split_club_names(c["clubs"]):
             kids_by_club.setdefault(name, []).append(c["id"])
 
-    result = []
-    for c in clubs:
-        sheet = price_map.get(c.name_ru, {})
-        d = _club_dict(c, kids_by_club.get(c.name_en, []))
-        if sheet.get("price") is not None:
-            d["price"] = sheet["price"]
-        if sheet.get("days"):
-            days = sheet["days"]
-            if "/" in days:
-                parts = [p.strip() for p in days.split("/")]
-                d["days_ru"] = parts[0]
-                d["days_en"] = parts[1] if len(parts) > 1 else parts[0]
-            else:
-                d["days_ru"] = days
-                d["days_en"] = days
-        if sheet.get("time"):
-            d["time"] = sheet["time"]
-        result.append(d)
-    return result
+    return [_club_dict(c, kids_by_club.get(c.name_en, [])) for c in clubs]
 
 @app.post("/clubs/{club_id}/members/{child_id}")
 def add_club_member(club_id: int, child_id: str, db: Session = Depends(get_db)):
@@ -827,11 +797,14 @@ def remove_club_member(club_id: int, child_id: str, db: Session = Depends(get_db
     _refresh_children_cache_async()
     return {"ok": True}
 
-def _club_name(club_id: int, db: Session) -> str:
+def _club_row(club_id: int, db: Session) -> models.Club:
     club = db.query(models.Club).filter_by(id=club_id).first()
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
-    return club.name_en
+    return club
+
+def _club_name(club_id: int, db: Session) -> str:
+    return _club_row(club_id, db).name_en
 
 @app.get("/club-attendance/{club_id}/{date}")
 def get_club_attendance(club_id: int, date: str, db: Session = Depends(get_db)):
@@ -843,10 +816,11 @@ class ClubAttendanceIn(BaseModel):
 
 @app.post("/club-attendance/{club_id}")
 def save_club_attendance(club_id: int, data: ClubAttendanceIn, request: Request, db: Session = Depends(get_db)):
-    club_name = _club_name(club_id, db)
-    compensated = sheets_client.upsert_club_attendance(club_name, data.date, data.statuses, _marker(request))
+    club = _club_row(club_id, db)
+    scheduled_weekdays = sheets_client._parse_club_weekdays(club.days_en)
+    compensated = sheets_client.upsert_club_attendance(club.name_en, data.date, data.statuses, _marker(request), scheduled_weekdays)
     for kid_id in compensated:
-        _add_carryover_feed_item(db, kid_id, data.date, club_name=club_name)
+        _add_carryover_feed_item(db, kid_id, data.date, club_name=club.name_en)
     return {"ok": True}
 
 @app.get("/club-attendance-history/{club_id}/{kid_id}")

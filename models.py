@@ -18,19 +18,17 @@ class Club(Base):
     emoji   = Column(String)
     color   = Column(String)
     ink     = Column(String)
+    # days_ru/days_en/time/price are the only source of truth for a club's
+    # schedule — this used to get silently overridden by whatever the
+    # separate Clubs Sheets tab said, backwards from how every other write
+    # in this app works (Sheets is a read-only mirror, never an input).
+    # No edit UI yet, so these are set directly in the DB for now.
     days_ru = Column(String)
     days_en = Column(String)
     time    = Column(String)
     price   = Column(Integer, nullable=True)
     # Membership itself lives in the Children sheet's "Clubs" column (see sheets_client),
     # not here — that's the single source of truth for who's in which club.
-
-class ClubScheduleCache(Base):
-    """Local mirror of the (separate) Clubs sheet's price/days/time — same
-    idea as ChildCache, just for the other Sheets tab /clubs merges in."""
-    __tablename__ = "club_schedule_cache"
-    id   = Column(Integer, primary_key=True)  # always 1 — single row holding the whole list
-    data = Column(String)  # JSON list, same shape get_clubs_from_sheets() returns
 
 class ChildCache(Base):
     """Local mirror of Sheets' Children data — refreshed from Sheets on a

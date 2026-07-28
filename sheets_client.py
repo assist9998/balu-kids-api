@@ -379,21 +379,27 @@ def get_club_attendance(club_name: str, date: str) -> dict:
     return result
 
 
-def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "") -> list[str]:
-    """Phase 5: writes straight to Postgres — see upsert_attendance."""
+def upsert_club_attendance(club_name: str, date: str, statuses: dict, marked_by: str = "",
+                            scheduled_weekdays: set | None = None) -> list[str]:
+    """Phase 5: writes straight to Postgres — see upsert_attendance.
+
+    scheduled_weekdays: which weekdays (Mon=0..Sun=6) this club actually
+    meets on, per the caller (main.py, reading models.Club) — passed in
+    rather than looked up here, since Club's own DB row is the only source
+    of truth for a club's schedule now (see _apply_club_day_carryover)."""
     for name, status in statuses.items():
         label = _STATUS_LABEL.get(status, status.capitalize())
         pg_dual_write.upsert_club_attendance(club_name, date, name, label, marked_by)
 
     if not _should_defer_carryover(date):
-        return _apply_club_day_carryover(club_name, date, statuses)
+        return _apply_club_day_carryover(club_name, date, statuses, scheduled_weekdays)
     return []
 
 
-def run_end_of_day_club_carryover(club_name: str, date: str) -> list[str]:
+def run_end_of_day_club_carryover(club_name: str, date: str, scheduled_weekdays: set | None = None) -> list[str]:
     """Club-scoped counterpart to run_end_of_day_carryover — same reasoning,
     called once per club by the end-of-day sweep."""
-    return _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date))
+    return _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date), scheduled_weekdays)
 
 
 def _parse_dmy(s: str):
@@ -701,7 +707,8 @@ def add_club_payment_log_entry(kid_id: str, club_name: str, from_date: str, unti
     return {"paidFrom": new_from, "paidUntil": new_until}
 
 
-def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list[str]:
+def _apply_club_day_carryover(club_name: str, date: str, statuses: dict,
+                               scheduled_weekdays: set | None = None) -> list[str]:
     """Same idea as _apply_day_carryover, scoped to one club — a kid on a
     per-day club plan who misses a weekday inside their paid window gets a
     zero-amount 'compensation' row in Club payment log instead of losing
@@ -712,6 +719,11 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list
     Returns the kid_ids actually compensated this call, same as
     _apply_day_carryover — see there for why.
 
+    scheduled_weekdays: which weekdays (Mon=0..Sun=6) this club actually
+    meets on — passed in by the caller (main.py, from models.Club), not
+    looked up here; None/empty means "unknown", which degrades to the old
+    "any weekday" behavior rather than blocking legitimate compensation.
+
     Phase 5: reads/writes Postgres directly, no Sheets involved."""
     try:
         d = datetime.strptime((date or "").strip(), "%Y-%m-%d").date()
@@ -719,14 +731,10 @@ def _apply_club_day_carryover(club_name: str, date: str, statuses: dict) -> list
         return []
     if d.weekday() >= 5:
         return []
-    scheduled_weekdays = _club_scheduled_weekdays(club_name)
     # A kid marked absent on a day this club doesn't even meet on (a
     # mis-tap, or historical data from before the club's real schedule was
     # entered correctly) never warrants compensation — there was no session
-    # to have missed in the first place. Only enforced when the schedule is
-    # actually known (see _club_scheduled_weekdays) so a Sheets hiccup
-    # degrades to the old "any weekday" behavior instead of blocking
-    # legitimate compensation.
+    # to have missed in the first place.
     if scheduled_weekdays and d.weekday() not in scheduled_weekdays:
         return []
     missed_dmy = d.strftime("%d.%m.%Y")
@@ -1014,38 +1022,6 @@ def delete_staff(name: str) -> None:
         raise ValueError(f"Staff not found: {name}")
 
 
-def get_clubs_from_sheets() -> list[dict]:
-    sh = _sheet()
-    ws = sh.worksheet("Clubs")
-    values = ws.get_all_values()
-    if not values or len(values) < 2:
-        return []
-    headers = values[0]
-    col = {h: i for i, h in enumerate(headers)}
-    clubs = []
-    for row in values[1:]:
-        def g(h): return row[col[h]].strip() if h in col and col[h] < len(row) else ""
-        name_ru = g("Name")
-        if not name_ru:
-            continue
-        price_str = g("Price")
-        price = None
-        if price_str:
-            try:
-                price = int(float(price_str.replace(" ", "").replace(",", ".")))
-            except ValueError:
-                pass
-        clubs.append({
-            "name_ru": name_ru,
-            "name_en": g("Name (EN)"),
-            "emoji":   g("Emoji"),
-            "days":    g("Days"),
-            "time":    g("Time"),
-            "price":   price,
-        })
-    return clubs
-
-
 _WEEKDAY_ABBR_EN = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 _WEEKDAY_ABBR_RU = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6}
 
@@ -1085,22 +1061,6 @@ def _next_club_day(d, scheduled_weekdays: set):
     while nxt.weekday() not in scheduled_weekdays:
         nxt += timedelta(days=1)
     return nxt
-
-
-def _club_scheduled_weekdays(club_name: str) -> set:
-    """Which weekdays (Mon=0..Sun=6) club_name (the English name) actually
-    meets on, per the live Clubs sheet — empty set if the sheet is
-    unreachable or the club/its Days cell can't be found, so a lookup
-    failure degrades to "don't restrict" rather than silently blocking
-    something that would otherwise have been fine."""
-    try:
-        clubs = get_clubs_from_sheets()
-    except Exception:
-        return set()
-    club = next((c for c in clubs if c["name_en"] == club_name), None)
-    if not club:
-        return set()
-    return _parse_club_weekdays(club["days"])
 
 
 _STAFF_ATTENDANCE_HEADER = ["Date", "Staff", "Status", "Arrival time", "Note", "Transfer", "Overtime"]
