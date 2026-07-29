@@ -1105,3 +1105,39 @@ def push_staff_attendance_rows(rows: list[dict]) -> None:
             "values": [[""] * ncols for _ in range(blank_rows)],
         })
     ws.batch_update(updates)
+
+
+_STAFF_TASKS_HEADER = ["Staff", "Task", "Recurrence", "Date", "Status", "Cancel reason"]
+
+
+def push_staff_tasks_rows(rows: list[dict]) -> None:
+    """One-way mirror only, same reasoning and same write pattern as
+    push_staff_attendance_rows above (new-data-first, stale-tail-cleared-
+    second, one batch_update, never a bare clear()) — one row per task
+    occurrence (not per task), so a weekly task shows each of its dates
+    separately rather than one row Ольга would need to open the app to
+    unpack."""
+    sh = _sheet()
+    try:
+        ws = sh.worksheet("Staff tasks")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Staff tasks", rows=1000, cols=len(_STAFF_TASKS_HEADER))
+        ws.update([_STAFF_TASKS_HEADER], "A1")
+
+    rows_sorted = sorted(rows, key=lambda r: (r.get("staff_name") or "", r.get("title") or "", r.get("date_label") or ""))
+    body = [[
+        r.get("staff_name") or "", r.get("title") or "", r.get("recurrence") or "",
+        r.get("date_label") or "", r.get("status") or "", r.get("cancel_reason") or "",
+    ] for r in rows_sorted]
+
+    ncols = len(_STAFF_TASKS_HEADER)
+    new_last_row = 1 + len(body)
+    current_last_row = len(ws.get_all_values())
+    updates = [{"range": f"A1:F{new_last_row}", "values": [_STAFF_TASKS_HEADER] + body}]
+    if current_last_row > new_last_row:
+        blank_rows = current_last_row - new_last_row
+        updates.append({
+            "range": f"A{new_last_row + 1}:F{current_last_row}",
+            "values": [[""] * ncols for _ in range(blank_rows)],
+        })
+    ws.batch_update(updates)

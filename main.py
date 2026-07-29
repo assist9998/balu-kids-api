@@ -315,10 +315,71 @@ def _staff_task_instance_sweep_loop() -> None:
         finally:
             db.close()
 
+# ── Staff tasks -> Sheets mirror ────────────────────────────────────────────
+# Same dirty-flag + cooldown pattern as staff attendance (see there for why):
+# every write endpoint below marks _staff_tasks_dirty, this loop pushes at
+# most once every STAFF_TASKS_PUSH_MIN_INTERVAL rather than once per edit.
+_staff_tasks_dirty = False
+_last_staff_tasks_push_at = 0.0
+STAFF_TASKS_PUSH_MIN_INTERVAL = 300  # 5 minutes
+STAFF_TASKS_PUSH_POLL_SECONDS = 30
+
+_WEEKDAY_LABELS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+def _task_recurrence_label(t: "models.StaffTask") -> str:
+    if t.recurrence == "once":
+        return "Разово"
+    if t.recurrence == "count":
+        return f"{t.target_count} раз"
+    weekdays = [int(x) for x in (t.weekdays or "").split(",") if x != ""]
+    return "Еженедельно: " + ", ".join(_WEEKDAY_LABELS_RU[w] for w in weekdays)
+
+_STATUS_LABEL_RU = {"pending": "Ожидает", "done": "Сделано", "postponed": "Перенос", "cancelled": "Отменено"}
+
+def _mark_staff_tasks_dirty():
+    global _staff_tasks_dirty
+    _staff_tasks_dirty = True
+
+def _push_staff_tasks(db: Session) -> None:
+    # Archived tasks are excluded — same reasoning as GET /staff-tasks: this
+    # is a live "what's currently on everyone's plate" view, not a history.
+    rows = []
+    for t in db.query(models.StaffTask).filter_by(archived=False).all():
+        instances = db.query(models.StaffTaskInstance).filter_by(task_id=t.id).all()
+        instances.sort(key=lambda i: (i.due_date or "", i.seq or 0))
+        recurrence_label = _task_recurrence_label(t)
+        for i in instances:
+            rows.append({
+                "staff_name": t.staff_name, "title": t.title, "recurrence": recurrence_label,
+                "date_label": i.due_date or f"Событие {i.seq}",
+                "status": _STATUS_LABEL_RU.get(i.status, i.status),
+                "cancel_reason": i.cancel_reason or "",
+            })
+    sheets_client.push_staff_tasks_rows(rows)
+
+def _staff_tasks_push_loop() -> None:
+    global _staff_tasks_dirty, _last_staff_tasks_push_at
+    while True:
+        time.sleep(STAFF_TASKS_PUSH_POLL_SECONDS)
+        if not _staff_tasks_dirty:
+            continue
+        if time.time() - _last_staff_tasks_push_at < STAFF_TASKS_PUSH_MIN_INTERVAL:
+            continue
+        _staff_tasks_dirty = False  # before the slow call — see staff attendance's push loop for why
+        db = SessionLocal()
+        try:
+            _push_staff_tasks(db)
+            _last_staff_tasks_push_at = time.time()
+        except Exception:
+            _staff_tasks_dirty = True
+        finally:
+            db.close()
+
 threading.Thread(target=_children_cache_refresh_loop, daemon=True).start()
 threading.Thread(target=_attendance_sweep_loop, daemon=True).start()
 threading.Thread(target=_staff_attendance_push_loop, daemon=True).start()
 threading.Thread(target=_staff_task_instance_sweep_loop, daemon=True).start()
+threading.Thread(target=_staff_tasks_push_loop, daemon=True).start()
 
 app = FastAPI()
 
@@ -597,6 +658,7 @@ def create_staff_task(data: StaffTaskIn, db: Session = Depends(get_db)):
         raise
     db.refresh(task)
     _ensure_task_instances(db, task)
+    _mark_staff_tasks_dirty()
     return _task_dict(task)
 
 @app.get("/staff-tasks/{staff_name}")
@@ -622,6 +684,7 @@ def archive_staff_task(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Task not found")
     task.archived = True
     db.commit()
+    _mark_staff_tasks_dirty()
     return {"ok": True}
 
 class StaffTaskInstanceIn(BaseModel):
@@ -639,6 +702,7 @@ def update_staff_task_instance(instance_id: int, data: StaffTaskInstanceIn, db: 
     inst.cancel_reason = data.cancelReason.strip() if data.status == "cancelled" else None
     inst.updated_at = datetime.now(timezone.utc).isoformat()
     db.commit()
+    _mark_staff_tasks_dirty()
     return _instance_dict(inst)
 
 @app.get("/staff-tasks-summary/{month}")
