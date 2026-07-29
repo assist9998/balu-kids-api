@@ -260,6 +260,28 @@ def get_payment_log_entries(child: str) -> list[dict]:
     ]
 
 
+def get_all_payment_log_entries() -> list[dict]:
+    """Every garden payment ever logged, across every child — for the
+    Journal tab (Ольга: a flat, newest-first ledger like the Sheets
+    Payment log, without needing Sheets to see it)."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, child, tariff, paid_from, paid_until, amount, entered_date, marked_by
+                   FROM payment_log ORDER BY id DESC"""
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return [
+        {"id": r[0], "child": r[1] or "", "tariff": r[2] or "", "from": r[3] or "", "until": r[4] or "",
+         "amount": r[5] or "", "enteredDate": r[6] or "", "markedBy": r[7] or ""}
+        for r in rows
+    ]
+
+
 def get_payment_log_entry_by_id(pg_id: int) -> dict | None:
     pool = _require_pool()
     conn = pool.getconn()

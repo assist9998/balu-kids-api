@@ -448,6 +448,22 @@ def _parse_log_values(values: list) -> list[dict]:
     return result
 
 
+def get_all_payment_log() -> list[dict]:
+    """Every garden payment ever logged, across every child, newest first —
+    the Journal tab (Ольга: same idea as the Payment log sheet, but visible
+    in the app without needing to open Sheets). Same Postgres-first,
+    fall-back-to-Sheets-on-failure treatment as get_payment_log."""
+    try:
+        return pg_dual_write.get_all_payment_log_entries()
+    except Exception as e:
+        print(f"[phase4] get_all_payment_log: Postgres read failed, falling back to Sheets: {e}")
+    sh = _sheet()
+    values = sh.worksheet("Payment log").get_all_values()
+    entries = _parse_log_values(values)
+    entries.sort(key=lambda e: e["id"], reverse=True)
+    return entries
+
+
 def get_payment_log(kid_id: str) -> list[dict]:
     """Every logged payment for one child — an append-only history, so
     short-term kids' separate visits (with gaps between) each keep their

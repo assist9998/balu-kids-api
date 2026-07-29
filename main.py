@@ -909,6 +909,14 @@ def attendance_history(kid_id: str):
 
 # ── Payment log ───────────────────────────────────────────────────────────────
 
+@app.get("/payment-log-journal")
+def get_payment_log_journal():
+    """Every garden payment ever logged, across every child — the
+    Payments "Журнал" tab, a flat newest-first ledger. A distinct path
+    (not /payment-log/{kid_id}) so there's no ambiguity with a real
+    kid_id."""
+    return sheets_client.get_all_payment_log()
+
 @app.get("/payment-log/{kid_id}")
 def get_payment_log(kid_id: str):
     return sheets_client.get_payment_log(kid_id)
