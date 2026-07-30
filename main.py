@@ -677,6 +677,41 @@ def get_staff_tasks(staff_name: str, db: Session = Depends(get_db)):
         result.append({**_task_dict(t), "instances": [_instance_dict(i) for i in instances]})
     return result
 
+class StaffTaskUpdateIn(BaseModel):
+    title:     str
+    startDate: str | None = None  # 'once' tasks only — also moves that task's one instance
+    endDate:   str | None = None  # 'weekly' tasks only — None always means "no end date"
+
+@app.patch("/staff-tasks/{task_id}")
+def update_staff_task(task_id: int, data: StaffTaskUpdateIn, db: Session = Depends(get_db)):
+    """Ольга: fix a typo in the task text, or move its deadline — not a
+    full re-configure of the recurrence pattern (weekdays/count stay as
+    they were set at creation; changing those would mean reconciling
+    already-answered instances against a new schedule, a bigger feature
+    than what was actually asked for)."""
+    task = db.query(models.StaffTask).filter_by(id=task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.title = data.title
+    if task.recurrence == "once" and data.startDate:
+        task.start_date = data.startDate
+        inst = db.query(models.StaffTaskInstance).filter_by(task_id=task.id).first()
+        if inst:
+            inst.due_date = data.startDate
+    elif task.recurrence == "weekly":
+        task.end_date = data.endDate
+        if data.endDate:
+            # Otherwise shortening the deadline would silently leave
+            # already-generated future occurrences still showing past it.
+            db.query(models.StaffTaskInstance).filter(
+                models.StaffTaskInstance.task_id == task.id,
+                models.StaffTaskInstance.status == "pending",
+                models.StaffTaskInstance.due_date > data.endDate,
+            ).delete()
+    db.commit()
+    _mark_staff_tasks_dirty()
+    return _task_dict(task)
+
 @app.delete("/staff-tasks/{task_id}")
 def archive_staff_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(models.StaffTask).filter_by(id=task_id).first()
