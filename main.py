@@ -109,8 +109,23 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
         if not members:
             continue
         existing_club = sheets_client.get_club_attendance(club.name_en, date)
-        unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
         scheduled_weekdays = sheets_client._parse_club_weekdays(club.days_en)
+        try:
+            date_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
+        except ValueError:
+            date_weekday = None
+        is_scheduled_day = not scheduled_weekdays or date_weekday in scheduled_weekdays
+        # A day that isn't this club's usual weekday, with nothing already
+        # logged on it, isn't a session that happened at all — nothing to
+        # default anyone to absent for (Ольга: the sweep was writing "дома"
+        # for every club member on days the club doesn't even meet). If the
+        # day DOES already have some marks (a rescheduled session, see
+        # ClubScreen's "Перенос занятия"), treat it like any other real
+        # session day — fill in whoever wasn't explicitly marked, run
+        # carryover as usual.
+        if not is_scheduled_day and not existing_club:
+            continue
+        unmarked_club = {kid_id: "absent" for kid_id in members if kid_id not in existing_club}
         if unmarked_club:
             sheets_client.upsert_club_attendance(club.name_en, date, unmarked_club, "Система", scheduled_weekdays)
         for kid_id in sheets_client.run_end_of_day_club_carryover(club.name_en, date, scheduled_weekdays):
