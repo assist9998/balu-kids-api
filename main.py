@@ -398,7 +398,8 @@ def _make_token(role: str, name: str | None = None) -> str:
 class LoginIn(BaseModel):
     password: str
 
-_STAFF_POSITION_ROLE = {"director": "director", "accounter": "staff", "accountant": "staff", "staff": "staff"}
+_STAFF_POSITION_ROLE = {"director": "director", "accounter": "staff", "accountant": "staff", "staff": "staff",
+                         "manager": "manager"}
 
 @app.post("/auth/login")
 def login(data: LoginIn):
