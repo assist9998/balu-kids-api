@@ -161,6 +161,27 @@ r3 = client.get("/staff-tasks/ZZZ Update Count", headers=headers)
 assert r3.json()[0]["titleEn"] is None, f"titleEn should be null when never translated, got {r3.json()[0]}"
 print("OK: titleEn set on create, updated on edit, stays null when never translated")
 
+print()
+print("=== test 7: GET /staff-tasks/{name} sorts by nearest pending due date, not creation order ===")
+# Deliberately create the LATER-due task first, so a naive "insertion order"
+# would put it first too — only an explicit sort catches this.
+r = client.post("/staff-tasks", json={
+    "staffName": "ZZZ Update Order", "title": "Задача на послезавтра", "recurrence": "once",
+    "startDate": "2026-08-20",
+}, headers=headers)
+later_id = r.json()["id"]
+r = client.post("/staff-tasks", json={
+    "staffName": "ZZZ Update Order", "title": "Задача на завтра", "recurrence": "once",
+    "startDate": "2026-08-18",
+}, headers=headers)
+sooner_id = r.json()["id"]
+r3 = client.get("/staff-tasks/ZZZ Update Order", headers=headers)
+ids_in_order = [t["id"] for t in r3.json()]
+assert ids_in_order == [sooner_id, later_id], (
+    f"FAIL: expected the sooner-due task first regardless of creation order, got {ids_in_order}"
+)
+print("OK: the task due soonest comes first, even though it was created second")
+
 os.remove(db_path)
 print()
 print("ALL STAFF-TASK-UPDATE TESTS PASSED")

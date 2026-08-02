@@ -708,6 +708,14 @@ def get_staff_tasks(staff_name: str, db: Session = Depends(get_db)):
         instances = db.query(models.StaffTaskInstance).filter_by(task_id=t.id).all()
         instances.sort(key=lambda i: (i.due_date or "", i.seq or 0))
         result.append({**_task_dict(t), "instances": [_instance_dict(i) for i in instances]})
+    # Whichever task has something due soonest goes first — an unordered
+    # list (previously just whatever order the DB happened to return) made
+    # a task due today look secondary to one due later, no help for
+    # actually figuring out what needs doing next.
+    def _sort_key(task: dict):
+        pending_dates = [i["dueDate"] for i in task["instances"] if i["status"] == "pending" and i["dueDate"]]
+        return (0, min(pending_dates)) if pending_dates else (1, task["startDate"] or "")
+    result.sort(key=_sort_key)
     return result
 
 class StaffTaskUpdateIn(BaseModel):
