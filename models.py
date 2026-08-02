@@ -95,6 +95,12 @@ class StaffTask(Base):
     id         = Column(Integer, primary_key=True, autoincrement=True)
     staff_name = Column(String)
     title      = Column(String)
+    # English translation of title, same one-tap RU->EN translate button as
+    # Уведомления (see ComposeScreen) — null until Ольга actually taps
+    # translate, so a task she never translated correctly falls back to
+    # displaying title regardless of viewer language, instead of mislabeling
+    # untranslated Russian text as English.
+    title_en   = Column(String, nullable=True)
     # 'once'   — a single instance due on start_date.
     # 'weekly' — one instance per matching weekday (see weekdays) every week,
     #            from start_date onward (open-ended unless end_date is set).

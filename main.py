@@ -254,6 +254,11 @@ def _migrate():
                     "CREATE UNIQUE INDEX staff_attendance_date_name_uq ON staff_attendance (date, staff_name)"
                 ))
                 conn.commit()
+        if "staff_tasks" in tables:
+            existing_cols = {c["name"] for c in inspector.get_columns("staff_tasks")}
+            if "title_en" not in existing_cols:
+                conn.execute(text("ALTER TABLE staff_tasks ADD COLUMN title_en VARCHAR"))
+                conn.commit()
     Base.metadata.create_all(bind=engine)
 
 def _seed_clubs(db: Session):
@@ -635,6 +640,7 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
 class StaffTaskIn(BaseModel):
     staffName:      str
     title:          str
+    titleEn:        str | None = None  # RU->EN translate button, see ComposeScreen
     recurrence:     str = "once"  # once | weekly | count
     weekdays:       list[int] = []  # 0=Mon..6=Sun, 'weekly' only
     targetCount:    int | None = None  # 'count' only
@@ -644,7 +650,7 @@ class StaffTaskIn(BaseModel):
 
 def _task_dict(t: "models.StaffTask") -> dict:
     return {
-        "id": t.id, "staffName": t.staff_name, "title": t.title, "recurrence": t.recurrence,
+        "id": t.id, "staffName": t.staff_name, "title": t.title, "titleEn": t.title_en, "recurrence": t.recurrence,
         "weekdays": [int(x) for x in (t.weekdays or "").split(",") if x != ""],
         "targetCount": t.target_count, "startDate": t.start_date, "endDate": t.end_date,
     }
@@ -666,7 +672,7 @@ def create_staff_task(data: StaffTaskIn, db: Session = Depends(get_db)):
         if existing:
             return _task_dict(existing)
     task = models.StaffTask(
-        staff_name=data.staffName, title=data.title, recurrence=data.recurrence,
+        staff_name=data.staffName, title=data.title, title_en=data.titleEn, recurrence=data.recurrence,
         weekdays=",".join(str(w) for w in data.weekdays) if data.weekdays else None,
         target_count=data.targetCount, start_date=data.startDate, end_date=data.endDate,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -706,6 +712,7 @@ def get_staff_tasks(staff_name: str, db: Session = Depends(get_db)):
 
 class StaffTaskUpdateIn(BaseModel):
     title:     str
+    titleEn:   str | None = None  # RU->EN translate button, see ComposeScreen
     startDate: str | None = None  # 'once' tasks only — also moves that task's one instance
     endDate:   str | None = None  # 'weekly' tasks only — None always means "no end date"
 
@@ -720,6 +727,7 @@ def update_staff_task(task_id: int, data: StaffTaskUpdateIn, db: Session = Depen
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     task.title = data.title
+    task.title_en = data.titleEn
     if task.recurrence == "once" and data.startDate:
         task.start_date = data.startDate
         inst = db.query(models.StaffTaskInstance).filter_by(task_id=task.id).first()

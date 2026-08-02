@@ -142,6 +142,25 @@ r = client.patch("/staff-tasks/999999", json={"title": "Ghost"}, headers=headers
 assert r.status_code == 404, r.text
 print("OK: 404 for a nonexistent task id")
 
+print()
+print("=== test 6: titleEn round-trips on create and update (RU->EN translate button) ===")
+r = client.post("/staff-tasks", json={
+    "staffName": "ZZZ Update Bilingual", "title": "Проверить аптечку", "titleEn": "Check the first aid kit",
+    "recurrence": "once", "startDate": "2026-08-05",
+}, headers=headers)
+assert r.status_code == 200, r.text
+task_b = r.json()
+assert task_b["titleEn"] == "Check the first aid kit", f"titleEn must round-trip from create, got {task_b}"
+r2 = client.patch(f"/staff-tasks/{task_b['id']}", json={
+    "title": "Проверить аптечку ещё раз", "titleEn": "Check the first aid kit again",
+}, headers=headers)
+assert r2.status_code == 200, r2.text
+assert r2.json()["titleEn"] == "Check the first aid kit again", f"titleEn must update too, got {r2.json()}"
+# a task created without ever translating has titleEn = null, not an empty string or the RU text
+r3 = client.get("/staff-tasks/ZZZ Update Count", headers=headers)
+assert r3.json()[0]["titleEn"] is None, f"titleEn should be null when never translated, got {r3.json()[0]}"
+print("OK: titleEn set on create, updated on edit, stays null when never translated")
+
 os.remove(db_path)
 print()
 print("ALL STAFF-TASK-UPDATE TESTS PASSED")
