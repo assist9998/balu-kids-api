@@ -91,14 +91,25 @@ def _run_attendance_sweep(date: str, db: Session) -> None:
     active = [c for c in _cached_children(db) if c.get("active", True)]
 
     existing = sheets_client.get_attendance(date)
-    unmarked = {c["id"]: "absent" for c in active if c["id"] not in existing}
-    if unmarked:
-        sheets_client.upsert_attendance(date, unmarked, "Система")
-    # Whole day's final picture now settled (today's real-time marks were
-    # never immediately compensated, see _should_defer_carryover) — decide
-    # carryover once, here, for everyone absent by the end of the day.
-    for kid_id in sheets_client.run_end_of_day_carryover(date):
-        _add_carryover_feed_item(db, kid_id, date)
+    try:
+        is_weekend = datetime.strptime(date, "%Y-%m-%d").weekday() >= 5
+    except ValueError:
+        is_weekend = False
+    # Ольга: the garden isn't open weekends — a Saturday/Sunday with nothing
+    # already marked on it isn't a day anyone was expected to show up, so
+    # there's nothing to default to absent (this was writing a "дома" row
+    # for every active kid every weekend, same bug as the club sweep had).
+    # If something IS already marked (a genuine one-off exception), treat
+    # it like a normal day and fill in/carry over as usual.
+    if not (is_weekend and not existing):
+        unmarked = {c["id"]: "absent" for c in active if c["id"] not in existing}
+        if unmarked:
+            sheets_client.upsert_attendance(date, unmarked, "Система")
+        # Whole day's final picture now settled (today's real-time marks were
+        # never immediately compensated, see _should_defer_carryover) —
+        # decide carryover once, here, for everyone absent by the end of the day.
+        for kid_id in sheets_client.run_end_of_day_carryover(date):
+            _add_carryover_feed_item(db, kid_id, date)
 
     kids_by_club = {}
     for c in active:
