@@ -362,7 +362,18 @@ def get_club_attendance(club_name: str, date: str) -> dict:
     """Same idea as get_attendance, but one sheet per club (e.g. "Chess
     attendance") instead of one shared sheet — clubs don't have a Group
     column, and each club's roster is small enough that a dedicated tab
-    is easier for Ольга to read than a shared sheet with a Club column."""
+    is easier for Ольга to read than a shared sheet with a Club column.
+
+    Phase 4 counterpart of get_attendance's Postgres-first read (previously
+    missing here — upsert_club_attendance already wrote straight to
+    Postgres, but this stayed Sheets-only, so anything saved for a club
+    not covered by the push_to_sheets mirror job just vanished on reload).
+    Works for any club_name, not just the ones that job happens to push."""
+    try:
+        return pg_dual_write.read_club_attendance(club_name, date)
+    except Exception as e:
+        print(f"[phase4] get_club_attendance: Postgres read failed, falling back to Sheets: {e}")
+
     sh = _sheet()
     try:
         ws = sh.worksheet(f"{club_name} attendance")

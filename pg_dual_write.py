@@ -417,6 +417,29 @@ def read_attendance(date: str) -> dict:
     return result
 
 
+def read_club_attendance(club_name: str, date: str) -> dict:
+    """Club-scoped counterpart to read_attendance — same club_attendance
+    table every club writes into (upsert_club_attendance), so this works
+    for any club_name without needing a hardcoded list anywhere."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT child, status FROM club_attendance WHERE club_name = %s AND date = %s",
+                (club_name, date),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    result = {}
+    for child, status in rows:
+        if not child:
+            continue
+        result[child] = "present" if (status or "").strip().lower() == "present" else "absent"
+    return result
+
+
 def read_attendance_history(child: str) -> dict:
     pool = _require_pool()
     conn = pool.getconn()
