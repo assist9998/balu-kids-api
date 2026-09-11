@@ -985,6 +985,23 @@ def save_attendance(data: AttendanceIn, request: Request, db: Session = Depends(
 def attendance_history(kid_id: str):
     return sheets_client.get_attendance_history(kid_id)
 
+# ── Meals ─────────────────────────────────────────────────────────────────────
+# Day-by-day meal mark (🍽 on the Journal screen), not a real club — no
+# models.Club row, no schedule/carryover, no club_id in the URL.
+
+@app.get("/meal-attendance/{date}")
+def get_meal_attendance(date: str):
+    return sheets_client.get_meal_attendance(date)
+
+class MealAttendanceIn(BaseModel):
+    date:     str
+    statuses: dict  # {kid_id: "present" | "absent"}
+
+@app.post("/meal-attendance")
+def save_meal_attendance(data: MealAttendanceIn, request: Request):
+    sheets_client.upsert_meal_attendance(data.date, data.statuses, _marker(request))
+    return {"ok": True}
+
 # ── Payment log ───────────────────────────────────────────────────────────────
 
 @app.get("/payment-log-journal")

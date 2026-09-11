@@ -413,6 +413,26 @@ def run_end_of_day_club_carryover(club_name: str, date: str, scheduled_weekdays:
     return _apply_club_day_carryover(club_name, date, get_club_attendance(club_name, date), scheduled_weekdays)
 
 
+_MEALS_CLUB_NAME = "Meals"
+
+
+def get_meal_attendance(date: str) -> dict:
+    """Day-by-day meal mark shown on the Journal screen (🍽 next to
+    был/не был), for kids with mealsIncluded=True on their card. Not a
+    real club — no models.Club row, no schedule, no payment log — just
+    reuses the same generic club_attendance table under a fixed name."""
+    return get_club_attendance(_MEALS_CLUB_NAME, date)
+
+
+def upsert_meal_attendance(date: str, statuses: dict, marked_by: str = "") -> None:
+    """Writes straight to Postgres via pg_dual_write, deliberately skipping
+    upsert_club_attendance's carryover compensation — there's no such thing
+    as a make-up meal for a day a kid just didn't eat."""
+    for kid_id, status in statuses.items():
+        pg_dual_write.upsert_club_attendance(_MEALS_CLUB_NAME, date, kid_id,
+            "Present" if status == "present" else "Absent", marked_by)
+
+
 def _parse_dmy(s: str):
     try:
         return datetime.strptime((s or "").strip(), "%d.%m.%Y").date()
