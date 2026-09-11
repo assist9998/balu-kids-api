@@ -1002,6 +1002,10 @@ def save_meal_attendance(data: MealAttendanceIn, request: Request):
     sheets_client.upsert_meal_attendance(data.date, data.statuses, _marker(request))
     return {"ok": True}
 
+@app.get("/meal-attendance-history/{kid_id}")
+def meal_attendance_history(kid_id: str):
+    return sheets_client.get_meal_attendance_history(kid_id)
+
 # ── Payment log ───────────────────────────────────────────────────────────────
 
 @app.get("/payment-log-journal")

@@ -433,6 +433,13 @@ def upsert_meal_attendance(date: str, statuses: dict, marked_by: str = "") -> No
             "Present" if status == "present" else "Absent", marked_by)
 
 
+def get_meal_attendance_history(kid_id: str) -> dict:
+    """Whole {date: present/absent} history for one kid's meal marks — same
+    shape as get_attendance_history, feeds the 🍽 badge on that kid's own
+    calendar (AttendanceHistorySheet), stacked under the paid-day badge."""
+    return get_club_attendance_history(_MEALS_CLUB_NAME, kid_id)
+
+
 def _parse_dmy(s: str):
     try:
         return datetime.strptime((s or "").strip(), "%d.%m.%Y").date()
