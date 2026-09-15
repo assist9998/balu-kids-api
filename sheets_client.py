@@ -95,12 +95,20 @@ def _contract(raw: str) -> str:
     return "tourist" if (raw or "").strip().lower() in _SHORT_TERM_LABELS else "longterm"
 
 
-def compute_rate(full_name: str, attendance_rows: list[dict]) -> int:
+def compute_rate(full_name: str, attendance_rows: list[dict], child_ref_id=None) -> int:
+    # Matches by the child's stable id (ChildRefId) when both the row and
+    # this child have one — a text-only match would undercount a recently
+    # renamed child's rate, since their older rows still carry the old
+    # name. Falls back to the old text match for rows without a linked id.
     cutoff = datetime.now() - timedelta(days=30)
     total = 0
     present = 0
     for row in attendance_rows:
-        if row.get("Child", "").strip() != full_name:
+        row_ref_id = row.get("ChildRefId")
+        if child_ref_id is not None and row_ref_id is not None:
+            if row_ref_id != child_ref_id:
+                continue
+        elif row.get("Child", "").strip() != full_name:
             continue
         date_str = row.get("Date", "").strip()
         if not date_str:
@@ -164,6 +172,7 @@ def get_children() -> list[dict]:
         if not first and not last:
             continue
         full_name = f"{first} {last}".strip()
+        pg_id = row.get("PgId")
 
         status_raw = (row.get("Status") or "").strip().lower()
         meals_raw = (row.get("Meals included") or "").strip().lower()
@@ -203,7 +212,7 @@ def get_children() -> list[dict]:
             "parent1Phone": (row.get("Parent contact (1)") or "").strip(),
             "parent2Name": (row.get("Parent name (2)") or "").strip(),
             "parent2Phone": (row.get("Parent contact (2)") or "").strip(),
-            "rate": compute_rate(full_name, attendance_rows),
+            "rate": compute_rate(full_name, attendance_rows, pg_id),
             **extra,
         })
 

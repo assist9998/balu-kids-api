@@ -585,7 +585,7 @@ def read_children_rows() -> list[dict]:
                     photo_consent AS "Using Photos for Media", parent1_name AS "Parent name (1)",
                     parent1_phone AS "Parent contact (1)", parent2_name AS "Parent name (2)",
                     parent2_phone AS "Parent contact (2)", address AS "Address",
-                    adaptation AS "Adaptation", status AS "Status"
+                    adaptation AS "Adaptation", status AS "Status", id AS "PgId"
                 FROM children ORDER BY full_name
             """)
             rows = cur.fetchall()
@@ -597,12 +597,14 @@ def read_children_rows() -> list[dict]:
 def read_attendance_rows_for_rate() -> list[dict]:
     """Just the columns compute_rate reads, for every row in the table (it
     filters by child itself) — shaped like _rows_as_dicts()'s Attendance
-    output."""
+    output. Includes ChildRefId so compute_rate can match a renamed child's
+    rate against rows still sitting under their old name text."""
     pool = _require_pool()
     conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""SELECT child AS "Child", date AS "Date", status AS "Status" FROM attendance""")
+            cur.execute("""SELECT child AS "Child", date AS "Date", status AS "Status",
+                                  child_ref_id AS "ChildRefId" FROM attendance""")
             rows = cur.fetchall()
     finally:
         pool.putconn(conn)
