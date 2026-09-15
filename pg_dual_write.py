@@ -430,27 +430,43 @@ def get_club_payment_log_entry_by_id(pg_id: int) -> dict | None:
 # ── Staff ─────────────────────────────────────────────────────────────────────
 
 def upsert_staff(name, position, contract_end, phone, password, rate) -> None:
-    _write(lambda cur: cur.execute(
-        """INSERT INTO staff (name, position, contract_end, phone, password, rate)
-           VALUES (%s,%s,%s,%s,%s,%s)
-           ON CONFLICT (name) DO UPDATE SET
-               position=EXCLUDED.position, contract_end=EXCLUDED.contract_end,
-               phone=EXCLUDED.phone, password=EXCLUDED.password, rate=EXCLUDED.rate""",
-        (name, position, contract_end, phone, password, rate)))
+    """Only ever called for a brand-new staff member (see add_staff) —
+    raises ValueError if that name is already taken instead of silently
+    merging into the existing person's row (same guard as upsert_child)."""
+    def _do(cur):
+        cur.execute("SELECT 1 FROM staff WHERE name = %s", (name,))
+        if cur.fetchone() is not None:
+            raise ValueError(f"A staff member named '{name}' already exists")
+        cur.execute(
+            """INSERT INTO staff (name, position, contract_end, phone, password, rate)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
+            (name, position, contract_end, phone, password, rate))
+    _write(_do)
 
 
 def rename_staff(old_name: str, name, position, contract_end, phone, password, rate) -> None:
+    """Updates the row in place (by old_name) instead of delete+reinsert —
+    same reasoning as rename_child. staff has no numeric id yet (staff_
+    attendance/staff_tasks in SQLite still key by name text, unlinked to
+    any stable id — a separate, lower-urgency gap, see
+    project_balu_kids_id_migration memory), so an in-place UPDATE is what
+    keeps this function itself safe for now.
+
+    Raises ValueError if the new name already belongs to a DIFFERENT staff
+    member — same collision guard as rename_child, same incident class."""
     def _do(cur):
-        if old_name != name:
-            cur.execute("DELETE FROM staff WHERE name = %s", (old_name,))
+        if name and name != old_name:
+            cur.execute("SELECT 1 FROM staff WHERE name = %s", (name,))
+            if cur.fetchone() is not None:
+                raise ValueError(f"A staff member named '{name}' already exists")
         cur.execute(
-            """INSERT INTO staff (name, position, contract_end, phone, password, rate)
-               VALUES (%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (name) DO UPDATE SET
-                   position=EXCLUDED.position, contract_end=EXCLUDED.contract_end,
-                   phone=EXCLUDED.phone, password=EXCLUDED.password, rate=EXCLUDED.rate""",
-            (name, position, contract_end, phone, password, rate),
+            """UPDATE staff SET name=%s, position=%s, contract_end=%s,
+                                 phone=%s, password=%s, rate=%s
+               WHERE name = %s""",
+            (name, position, contract_end, phone, password, rate, old_name),
         )
+        if cur.rowcount == 0:
+            raise ValueError(f"Staff not found: {old_name}")
     _write(_do)
 
 

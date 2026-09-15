@@ -511,11 +511,14 @@ def get_staff():
 
 @app.post("/staff")
 def create_staff(data: StaffIn):
-    sheets_client.add_staff({
-        "Name": data.name, "Position": data.position,
-        "Contract End": data.contractEnd, "Phone": data.phone,
-        "Password": data.password, "Rate": data.rate,
-    })
+    try:
+        sheets_client.add_staff({
+            "Name": data.name, "Position": data.position,
+            "Contract End": data.contractEnd, "Phone": data.phone,
+            "Password": data.password, "Rate": data.rate,
+        })
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
 
 @app.put("/staff/{old_name}")
@@ -529,7 +532,11 @@ def update_staff(old_name: str, data: StaffIn):
     try:
         sheets_client.update_staff(old_name, payload)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        # "not found" (old_name doesn't exist) is a 404; a name collision
+        # with a DIFFERENT staff member is a 400 — same distinction as
+        # /children's create_child/update_child_data.
+        status = 404 if str(e).startswith("Staff not found") else 400
+        raise HTTPException(status_code=status, detail=str(e))
     return {"ok": True}
 
 @app.delete("/staff/{name}")
