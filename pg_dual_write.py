@@ -171,14 +171,36 @@ def get_child_full_row(full_name: str) -> dict | None:
 # ── Attendance ────────────────────────────────────────────────────────────────
 
 def upsert_attendance(date: str, child: str, group: str, status: str, marked_by: str) -> None:
+    # Resolve to the child's stable numeric id when possible and conflict on
+    # (date, child_ref_id) instead of (date, child) — a same-day rename no
+    # longer produces a second row under the new name (see the Sofia/Sonya
+    # incident: the old text-only key let renamed kids fork into duplicate,
+    # conflicting attendance rows for the same day). child is still stored
+    # and kept fresh on every write so unconverted read paths keep working.
+    # Falls back to the old text-keyed conflict target when the name can't
+    # be resolved (child not found — shouldn't happen for a real save, but
+    # safer than silently dropping the write).
     def _do(cur):
-        cur.execute(
-            """INSERT INTO attendance (date, child, "group", status, marked_by)
-               VALUES (%s,%s,%s,%s,%s)
-               ON CONFLICT (date, child) DO UPDATE SET
-                   status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
-            (date, child, group, status, marked_by),
-        )
+        cur.execute("SELECT id FROM children WHERE full_name = %s", (child,))
+        row = cur.fetchone()
+        child_ref_id = row[0] if row else None
+        if child_ref_id is not None:
+            cur.execute(
+                """INSERT INTO attendance (date, child, "group", status, marked_by, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (date, child_ref_id) DO UPDATE SET
+                       child=EXCLUDED.child, "group"=EXCLUDED."group",
+                       status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
+                (date, child, group, status, marked_by, child_ref_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO attendance (date, child, "group", status, marked_by)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (date, child) DO UPDATE SET
+                       status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
+                (date, child, group, status, marked_by),
+            )
     _write(_do)
 
 
@@ -441,11 +463,19 @@ def read_club_attendance(club_name: str, date: str) -> dict:
 
 
 def read_attendance_history(child: str) -> dict:
+    # Match by the child's stable id (resolved from their current name) so a
+    # past rename doesn't hide history recorded under an old name — falls
+    # back to a plain text match for any row that predates the id link.
     pool = _require_pool()
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT date, status FROM attendance WHERE child = %s", (child,))
+            cur.execute(
+                """SELECT date, status FROM attendance
+                   WHERE child_ref_id = (SELECT id FROM children WHERE full_name = %s)
+                      OR (child = %s AND child_ref_id IS NULL)""",
+                (child, child),
+            )
             rows = cur.fetchall()
     finally:
         pool.putconn(conn)
