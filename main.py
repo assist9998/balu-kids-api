@@ -848,7 +848,10 @@ class ChildDataIn(BaseModel):
 
 @app.post("/children")
 def create_child(data: ChildDataIn):
-    new_id = sheets_client.add_child(data.dict())
+    try:
+        new_id = sheets_client.add_child(data.dict())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # Frontend has no local copy of a brand-new child to patch in — it reloads
     # from /children right after, so the cache must already contain it by
     # the time this response goes out, not "eventually" via the background loop.
@@ -858,7 +861,10 @@ def create_child(data: ChildDataIn):
 @app.put("/children/{child_id}")
 def update_child_data(child_id: str, data: ChildDataIn):
     # exclude_unset=True — only update fields explicitly sent in the request
-    sheets_client.update_child(child_id, data.dict(exclude_unset=True))
+    try:
+        sheets_client.update_child(child_id, data.dict(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     _refresh_children_cache_async()
     return {"ok": True}
 

@@ -82,8 +82,15 @@ _CHILD_COLS = [
 
 
 def upsert_child(row: dict) -> None:
-    """row keys match _CHILD_COLS; full_name is the stable key the app uses as id."""
+    """row keys match _CHILD_COLS; full_name is the stable key the app uses as id.
+    Only ever called for a brand-new child (see add_child) — raises
+    ValueError if that name is already taken instead of silently merging
+    into the existing child's row (same guard as rename_child)."""
     def _do(cur):
+        full_name = row.get("full_name")
+        cur.execute("SELECT 1 FROM children WHERE full_name = %s", (full_name,))
+        if cur.fetchone() is not None:
+            raise ValueError(f"A child named '{full_name}' already exists")
         collist = ",".join(f'"{c}"' if c == "group" else c for c in _CHILD_COLS)
         placeholders = ",".join(["%s"] * len(_CHILD_COLS))
         updates = ",".join(f'"{c}"=EXCLUDED."{c}"' if c == "group" else f"{c}=EXCLUDED.{c}"
@@ -99,8 +106,25 @@ def upsert_child(row: dict) -> None:
 def rename_child(old_full_name: str, row: dict) -> None:
     """full_name is the primary key but can change on rename — delete the old
     key's row first (if the name actually changed), then upsert under the
-    new one, both in the same write so a failure can't leave both rows."""
+    new one, both in the same write so a failure can't leave both rows.
+
+    Raises ValueError if the new name already belongs to a DIFFERENT child.
+    Before this check existed, ON CONFLICT (full_name) DO UPDATE would
+    silently merge the two children's rows under the shared name instead of
+    erroring — the exact mechanism behind the Sofia/Sonya incident (two
+    children renamed to the same name, one's data overwritten with no
+    error). The frontend already blocks this client-side, but that check
+    can miss a stale cache or a second tab — this is the real guarantee."""
     def _do(cur):
+        new_full_name = row.get("full_name")
+        if new_full_name and new_full_name != old_full_name:
+            cur.execute("SELECT id FROM children WHERE full_name = %s", (new_full_name,))
+            existing = cur.fetchone()
+            if existing is not None:
+                cur.execute("SELECT id FROM children WHERE full_name = %s", (old_full_name,))
+                current = cur.fetchone()
+                if current is None or existing[0] != current[0]:
+                    raise ValueError(f"A child named '{new_full_name}' already exists")
         if old_full_name != row.get("full_name"):
             cur.execute("DELETE FROM children WHERE full_name = %s", (old_full_name,))
         collist = ",".join(f'"{c}"' if c == "group" else c for c in _CHILD_COLS)
@@ -205,14 +229,29 @@ def upsert_attendance(date: str, child: str, group: str, status: str, marked_by:
 
 
 def upsert_club_attendance(club_name: str, date: str, child: str, status: str, marked_by: str) -> None:
+    # Same id-based conflict target as upsert_attendance (see its comment) —
+    # a same-day rename must update the same child's club attendance row
+    # instead of forking a second one under the new name.
     def _do(cur):
-        cur.execute(
-            """INSERT INTO club_attendance (club_name, date, child, status, marked_by)
-               VALUES (%s,%s,%s,%s,%s)
-               ON CONFLICT (club_name, date, child) DO UPDATE SET
-                   status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
-            (club_name, date, child, status, marked_by),
-        )
+        cur.execute("SELECT id FROM children WHERE full_name = %s", (child,))
+        row = cur.fetchone()
+        child_ref_id = row[0] if row else None
+        if child_ref_id is not None:
+            cur.execute(
+                """INSERT INTO club_attendance (club_name, date, child, status, marked_by, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (club_name, date, child_ref_id) DO UPDATE SET
+                       child=EXCLUDED.child, status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
+                (club_name, date, child, status, marked_by, child_ref_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO club_attendance (club_name, date, child, status, marked_by)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (club_name, date, child) DO UPDATE SET
+                       status=EXCLUDED.status, marked_by=EXCLUDED.marked_by""",
+                (club_name, date, child, status, marked_by),
+            )
     _write(_do)
 
 
@@ -226,17 +265,24 @@ def insert_payment_log(child, group, tariff, paid_from, paid_until, amount, ente
     # With a key: ON CONFLICT DO NOTHING makes a safely-retried duplicate
     # call (see add_payment_log_entry) a no-op instead of a second row.
     # Without one (older caller, or None) — plain insert, unchanged.
-    if idempotency_key:
-        _write(lambda cur: cur.execute(
-            """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (idempotency_key) DO NOTHING""",
-            (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)))
-    else:
-        _write(lambda cur: cur.execute(
-            """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by)))
+    # child_ref_id (resolved from the child's current name) rides along so
+    # get_payment_log_entries can find this row later even after a rename.
+    def _do(cur):
+        cur.execute("SELECT id FROM children WHERE full_name = %s", (child,))
+        row = cur.fetchone()
+        child_ref_id = row[0] if row else None
+        if idempotency_key:
+            cur.execute(
+                """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (idempotency_key) DO NOTHING""",
+                (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key, child_ref_id))
+        else:
+            cur.execute(
+                """INSERT INTO payment_log (child, "group", tariff, paid_from, paid_until, amount, entered_date, marked_by, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (child, group, tariff, paid_from, paid_until, amount, entered_date, marked_by, child_ref_id))
+    _write(_do)
 
 
 def delete_payment_log_by_id(pg_id: int) -> None:
@@ -245,17 +291,22 @@ def delete_payment_log_by_id(pg_id: int) -> None:
 
 def insert_club_payment_log(child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by,
                              idempotency_key=None) -> None:
-    if idempotency_key:
-        _write(lambda cur: cur.execute(
-            """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (idempotency_key) DO NOTHING""",
-            (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key)))
-    else:
-        _write(lambda cur: cur.execute(
-            """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by)))
+    def _do(cur):
+        cur.execute("SELECT id FROM children WHERE full_name = %s", (child,))
+        row = cur.fetchone()
+        child_ref_id = row[0] if row else None
+        if idempotency_key:
+            cur.execute(
+                """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (idempotency_key) DO NOTHING""",
+                (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by, idempotency_key, child_ref_id))
+        else:
+            cur.execute(
+                """INSERT INTO club_payment_log (child, "group", club_name, paid_from, paid_until, amount, entered_date, marked_by, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (child, group, club_name, paid_from, paid_until, amount, entered_date, marked_by, child_ref_id))
+    _write(_do)
 
 
 def delete_club_payment_log_by_id(pg_id: int) -> None:
@@ -263,14 +314,19 @@ def delete_club_payment_log_by_id(pg_id: int) -> None:
 
 
 def get_payment_log_entries(child: str) -> list[dict]:
+    # Same id-based match as read_attendance_history — a rename shouldn't
+    # hide payments logged under the child's old name.
     pool = _require_pool()
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT id, tariff, paid_from, paid_until, amount, entered_date, marked_by
-                   FROM payment_log WHERE child = %s ORDER BY id""",
-                (child,),
+                   FROM payment_log
+                   WHERE child_ref_id = (SELECT id FROM children WHERE full_name = %s)
+                      OR (child = %s AND child_ref_id IS NULL)
+                   ORDER BY id""",
+                (child, child),
             )
             rows = cur.fetchall()
     finally:
@@ -326,14 +382,19 @@ def get_payment_log_entry_by_id(pg_id: int) -> dict | None:
 def get_club_payment_log_entries(club_name: str) -> list[dict]:
     """Keeps "child" in the result (unlike get_payment_log_entries, which
     drops it) — the frontend fetches this once per club and filters by
-    child.id on its own side."""
+    child.id on its own side. Because of that client-side match, "child" is
+    resolved through child_ref_id to the child's CURRENT name whenever
+    possible — a stale name from before a rename would otherwise never
+    match any kid.id the frontend has and silently vanish from the list."""
     pool = _require_pool()
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, child, paid_from, paid_until, amount, entered_date, marked_by
-                   FROM club_payment_log WHERE club_name = %s ORDER BY id""",
+                """SELECT cpl.id, COALESCE(c.full_name, cpl.child), cpl.paid_from, cpl.paid_until,
+                          cpl.amount, cpl.entered_date, cpl.marked_by
+                   FROM club_payment_log cpl LEFT JOIN children c ON c.id = cpl.child_ref_id
+                   WHERE cpl.club_name = %s ORDER BY cpl.id""",
                 (club_name,),
             )
             rows = cur.fetchall()
@@ -488,8 +549,12 @@ def read_club_attendance_history(club_name: str, child: str) -> dict:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT date, status FROM club_attendance WHERE club_name = %s AND child = %s",
-                (club_name, child),
+                """SELECT date, status FROM club_attendance
+                   WHERE club_name = %s AND (
+                       child_ref_id = (SELECT id FROM children WHERE full_name = %s)
+                       OR (child = %s AND child_ref_id IS NULL)
+                   )""",
+                (club_name, child, child),
             )
             rows = cur.fetchall()
     finally:
