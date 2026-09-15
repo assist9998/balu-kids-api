@@ -104,9 +104,14 @@ def upsert_child(row: dict) -> None:
 
 
 def rename_child(old_full_name: str, row: dict) -> None:
-    """full_name is the primary key but can change on rename — delete the old
-    key's row first (if the name actually changed), then upsert under the
-    new one, both in the same write so a failure can't leave both rows.
+    """full_name is the primary key but can change on rename — updates the
+    row IN PLACE (by old_full_name) instead of delete+reinsert. The id
+    column must survive a rename unchanged: attendance/club_attendance/
+    payment_log/club_payment_log all link back to this child through
+    child_ref_id, and a delete+reinsert used to hand out a fresh serial id
+    on every single rename, silently orphaning that child's entire prior
+    history each time (caught 15.09.2026 in testing, before it could hit
+    a real rename — see project_balu_kids_id_migration memory).
 
     Raises ValueError if the new name already belongs to a DIFFERENT child.
     Before this check existed, ON CONFLICT (full_name) DO UPDATE would
@@ -125,17 +130,13 @@ def rename_child(old_full_name: str, row: dict) -> None:
                 current = cur.fetchone()
                 if current is None or existing[0] != current[0]:
                     raise ValueError(f"A child named '{new_full_name}' already exists")
-        if old_full_name != row.get("full_name"):
-            cur.execute("DELETE FROM children WHERE full_name = %s", (old_full_name,))
-        collist = ",".join(f'"{c}"' if c == "group" else c for c in _CHILD_COLS)
-        placeholders = ",".join(["%s"] * len(_CHILD_COLS))
-        updates = ",".join(f'"{c}"=EXCLUDED."{c}"' if c == "group" else f"{c}=EXCLUDED.{c}"
-                            for c in _CHILD_COLS if c != "full_name")
+        setlist = ",".join(f'"{c}"=%s' if c == "group" else f"{c}=%s" for c in _CHILD_COLS)
         cur.execute(
-            f"""INSERT INTO children ({collist}) VALUES ({placeholders})
-                ON CONFLICT (full_name) DO UPDATE SET {updates}""",
-            [row.get(c, "") for c in _CHILD_COLS],
+            f"UPDATE children SET {setlist} WHERE full_name = %s",
+            [row.get(c, "") for c in _CHILD_COLS] + [old_full_name],
         )
+        if cur.rowcount == 0:
+            raise ValueError(f"Child not found: {old_full_name}")
     _write(_do)
 
 
