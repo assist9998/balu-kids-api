@@ -502,31 +502,49 @@ class StaffIn(BaseModel):
 _NON_TRACKED_POSITIONS = {"director", "developer"}
 
 @app.get("/staff")
-def get_staff():
+def get_staff(request: Request):
+    # Salary and contract date are director-only (Olga: the whole team could
+    # see this before, since every logged-in role hits this same endpoint —
+    # the Персонал tab being UI-gated to director/manager never stopped a
+    # teacher's own valid token from reading it straight from the API).
+    is_director = getattr(request.state, "session", {}).get("role") == "director"
     staff = sheets_client.get_staff()
-    return [{"name": s["name"], "position": s["position"],
-             "contractEnd": s["contractEnd"], "phone": s["phone"],
-             "rate": s["rate"]} for s in staff
-            if s["position"].strip().lower() not in _NON_TRACKED_POSITIONS]
+    result = []
+    for s in staff:
+        if s["position"].strip().lower() in _NON_TRACKED_POSITIONS:
+            continue
+        row = {"name": s["name"], "position": s["position"], "phone": s["phone"]}
+        if is_director:
+            row["contractEnd"] = s["contractEnd"]
+            row["rate"] = s["rate"]
+        result.append(row)
+    return result
 
 @app.post("/staff")
-def create_staff(data: StaffIn):
+def create_staff(data: StaffIn, request: Request):
+    is_director = getattr(request.state, "session", {}).get("role") == "director"
+    payload = {
+        "Name": data.name, "Position": data.position,
+        "Phone": data.phone, "Password": data.password,
+    }
+    if is_director:  # only director sets salary/contract, even on create
+        payload["Contract End"] = data.contractEnd
+        payload["Rate"] = data.rate
     try:
-        sheets_client.add_staff({
-            "Name": data.name, "Position": data.position,
-            "Contract End": data.contractEnd, "Phone": data.phone,
-            "Password": data.password, "Rate": data.rate,
-        })
+        sheets_client.add_staff(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
 
 @app.put("/staff/{old_name}")
-def update_staff(old_name: str, data: StaffIn):
+def update_staff(old_name: str, data: StaffIn, request: Request):
+    is_director = getattr(request.state, "session", {}).get("role") == "director"
     payload = {
-        "Name": data.name, "Position": data.position,
-        "Contract End": data.contractEnd, "Phone": data.phone, "Rate": data.rate,
+        "Name": data.name, "Position": data.position, "Phone": data.phone,
     }
+    if is_director:  # non-director saves must never blank out salary/contract
+        payload["Contract End"] = data.contractEnd
+        payload["Rate"] = data.rate
     if data.password:  # only update password if provided
         payload["Password"] = data.password
     try:
