@@ -449,6 +449,25 @@ def get_meal_attendance_history(kid_id: str) -> dict:
     return get_club_attendance_history(_MEALS_CLUB_NAME, kid_id)
 
 
+def get_child_stars(date: str) -> dict:
+    """{kid_id: count} for the Journal roster — Primary School reward stars,
+    tapped on a kid's avatar for a day they're present. 0-3 per day."""
+    return pg_dual_write.read_child_stars(date)
+
+
+def upsert_child_stars(date: str, counts: dict, marked_by: str = "") -> None:
+    """Writes straight to Postgres — same as meal marks, no carryover
+    concept (a star not given today has no make-up day)."""
+    for kid_id, count in counts.items():
+        pg_dual_write.upsert_child_star(date, kid_id, int(count), marked_by)
+
+
+def get_child_star_history(kid_id: str) -> dict:
+    """Whole {date: count} history for one kid — feeds the star badge on
+    their own calendar, same shape as get_meal_attendance_history."""
+    return pg_dual_write.read_child_star_history(kid_id)
+
+
 def _parse_dmy(s: str):
     try:
         return datetime.strptime((s or "").strip(), "%d.%m.%Y").date()

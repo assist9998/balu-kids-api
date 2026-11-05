@@ -256,6 +256,67 @@ def upsert_club_attendance(club_name: str, date: str, child: str, status: str, m
     _write(_do)
 
 
+# ── Child stars (Primary School reward marks) ───────────────────────────────────
+# One row per (date, child), count 0-3 — how many stars a teacher gave that
+# child that day. Same id-based upsert as upsert_attendance/upsert_club_attendance
+# above, so a same-day rename updates the same row instead of forking one
+# under the new name.
+
+def upsert_child_star(date: str, child: str, count: int, marked_by: str) -> None:
+    def _do(cur):
+        cur.execute("SELECT id FROM children WHERE full_name = %s", (child,))
+        row = cur.fetchone()
+        child_ref_id = row[0] if row else None
+        if child_ref_id is not None:
+            cur.execute(
+                """INSERT INTO child_stars (date, child, count, marked_by, child_ref_id)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (date, child_ref_id) DO UPDATE SET
+                       child=EXCLUDED.child, count=EXCLUDED.count, marked_by=EXCLUDED.marked_by""",
+                (date, child, count, marked_by, child_ref_id),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO child_stars (date, child, count, marked_by)
+                   VALUES (%s,%s,%s,%s)
+                   ON CONFLICT (date, child) DO UPDATE SET
+                       count=EXCLUDED.count, marked_by=EXCLUDED.marked_by""",
+                (date, child, count, marked_by),
+            )
+    _write(_do)
+
+
+def read_child_stars(date: str) -> dict:
+    """{child: count} for one day — the journal/roster view."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT child, count FROM child_stars WHERE date = %s", (date,))
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return {child: (count or 0) for child, count in rows if child}
+
+
+def read_child_star_history(child: str) -> dict:
+    """{date: count} for one child, across all time — the calendar view."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT date, count FROM child_stars
+                   WHERE child_ref_id = (SELECT id FROM children WHERE full_name = %s)
+                      OR (child = %s AND child_ref_id IS NULL)""",
+                (child, child),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return {date: (count or 0) for date, count in rows}
+
+
 # ── Payment log / Club payment log ─────────────────────────────────────────────
 # Postgres's own serial id is now the ONLY identifier the app ever hands the
 # frontend for these (see get_payment_log/get_club_payment_log) — no more

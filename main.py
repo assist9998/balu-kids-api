@@ -1037,6 +1037,28 @@ def save_meal_attendance(data: MealAttendanceIn, request: Request):
 def meal_attendance_history(kid_id: str):
     return sheets_client.get_meal_attendance_history(kid_id)
 
+# ── Child stars ───────────────────────────────────────────────────────────────
+# Primary School reward mark (⭐ on a present kid's avatar in the Journal),
+# 0-3 per day, kept forever — not reset weekly, Ольга asked for a running
+# history instead (see child's calendar).
+
+@app.get("/child-stars/{date}")
+def get_child_stars(date: str):
+    return sheets_client.get_child_stars(date)
+
+class ChildStarsIn(BaseModel):
+    date:   str
+    counts: dict  # {kid_id: 0-3}
+
+@app.post("/child-stars")
+def save_child_stars(data: ChildStarsIn, request: Request):
+    sheets_client.upsert_child_stars(data.date, data.counts, _marker(request))
+    return {"ok": True}
+
+@app.get("/child-stars-history/{kid_id}")
+def child_stars_history(kid_id: str):
+    return sheets_client.get_child_star_history(kid_id)
+
 # ── Payment log ───────────────────────────────────────────────────────────────
 
 @app.get("/payment-log-journal")
