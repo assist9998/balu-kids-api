@@ -74,6 +74,11 @@ class StaffAttendance(Base):
     # option, which meant it silently couldn't be shown at the same time as
     # 'late' — same bug class transfer already avoided by being separate).
     extra        = Column(Boolean, default=False)
+    # Поощрение — a director's recognition mark for the day, same "extra"
+    # shape as transfer/overtime (independent of status, can combine with
+    # either or both). Director taps it on a present staff member, no
+    # further meaning attached — same idea as the kids' reward star.
+    star         = Column(Boolean, default=False)
 
     # One row per (date, staff) — required for the ON CONFLICT upsert in
     # main.py's _upsert_staff_attendance_row to have a target at all, and

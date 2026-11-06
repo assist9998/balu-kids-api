@@ -451,7 +451,7 @@ def get_meal_attendance_history(kid_id: str) -> dict:
 
 def get_child_stars(date: str) -> dict:
     """{kid_id: count} for the Journal roster — Primary School reward stars,
-    tapped on a kid's avatar for a day they're present. 0-3 per day."""
+    tapped on a kid's avatar for a day they're present. One per day."""
     return pg_dual_write.read_child_stars(date)
 
 
@@ -466,6 +466,13 @@ def get_child_star_history(kid_id: str) -> dict:
     """Whole {date: count} history for one kid — feeds the star badge on
     their own calendar, same shape as get_meal_attendance_history."""
     return pg_dual_write.read_child_star_history(kid_id)
+
+
+def get_child_stars_weekly(date: str) -> dict:
+    """{kid_id: weekly total} for the badge-on-the-star count in the
+    Journal and on the profile card — Mon-Sun sum, one query for the
+    whole group rather than one per kid."""
+    return pg_dual_write.read_child_stars_weekly(date)
 
 
 def _parse_dmy(s: str):
@@ -1145,7 +1152,7 @@ def _next_club_day(d, scheduled_weekdays: set):
     return nxt
 
 
-_STAFF_ATTENDANCE_HEADER = ["Date", "Staff", "Status", "Arrival time", "Note", "Transfer", "Overtime"]
+_STAFF_ATTENDANCE_HEADER = ["Date", "Staff", "Status", "Arrival time", "Note", "Transfer", "Overtime", "Star"]
 
 
 def push_staff_attendance_rows(rows: list[dict]) -> None:
@@ -1173,17 +1180,17 @@ def push_staff_attendance_rows(rows: list[dict]) -> None:
     body = [[
         r.get("date") or "", r.get("staff_name") or "", r.get("status") or "",
         r.get("arrival_time") or "", r.get("note") or "",
-        (r.get("transfer") or ""), "Yes" if r.get("extra") else "",
+        (r.get("transfer") or ""), "Yes" if r.get("extra") else "", "Yes" if r.get("star") else "",
     ] for r in rows_sorted]
 
     ncols = len(_STAFF_ATTENDANCE_HEADER)
     new_last_row = 1 + len(body)
     current_last_row = len(ws.get_all_values())
-    updates = [{"range": f"A1:G{new_last_row}", "values": [_STAFF_ATTENDANCE_HEADER] + body}]
+    updates = [{"range": f"A1:H{new_last_row}", "values": [_STAFF_ATTENDANCE_HEADER] + body}]
     if current_last_row > new_last_row:
         blank_rows = current_last_row - new_last_row
         updates.append({
-            "range": f"A{new_last_row + 1}:G{current_last_row}",
+            "range": f"A{new_last_row + 1}:H{current_last_row}",
             "values": [[""] * ncols for _ in range(blank_rows)],
         })
     ws.batch_update(updates)

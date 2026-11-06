@@ -181,7 +181,7 @@ def _push_staff_attendance(db: Session) -> None:
     rows = db.query(models.StaffAttendance).all()
     sheets_client.push_staff_attendance_rows([
         {"date": r.date, "staff_name": r.staff_name, "status": r.status,
-         "arrival_time": r.arrival_time, "note": r.note, "transfer": r.transfer, "extra": r.extra}
+         "arrival_time": r.arrival_time, "note": r.note, "transfer": r.transfer, "extra": r.extra, "star": r.star}
         for r in rows
     ])
 
@@ -241,6 +241,9 @@ def _migrate():
                 conn.commit()
             if "extra" not in existing_cols:
                 conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN extra BOOLEAN DEFAULT 0"))
+                conn.commit()
+            if "star" not in existing_cols:
+                conn.execute(text("ALTER TABLE staff_attendance ADD COLUMN star BOOLEAN DEFAULT 0"))
                 conn.commit()
             # Without this, two concurrent writes for the same (date, staff)
             # (e.g. the durable queue retrying a request whose first attempt
@@ -569,12 +572,12 @@ def delete_staff(name: str):
 def get_staff_attendance(date: str, db: Session = Depends(get_db)):
     rows = db.query(models.StaffAttendance).filter_by(date=date).all()
     return {r.staff_name: {"status": r.status, "arrival_time": r.arrival_time or "", "note": r.note or "",
-                           "transfer": r.transfer or 0, "extra": bool(r.extra)}
+                           "transfer": r.transfer or 0, "extra": bool(r.extra), "star": bool(r.star)}
             for r in rows}
 
 def _upsert_staff_attendance_row(db: Session, date: str, staff_name: str, status: str,
                                   arrival_time: str | None, note: str | None,
-                                  transfer: float, extra: bool) -> None:
+                                  transfer: float, extra: bool, star: bool) -> None:
     """One atomic INSERT ... ON CONFLICT (date, staff_name) DO UPDATE, instead
     of a SELECT to check "does a row exist" followed by a separate INSERT or
     UPDATE. That select-then-write shape has a real race: two requests for
@@ -586,18 +589,19 @@ def _upsert_staff_attendance_row(db: Session, date: str, staff_name: str, status
     possible at all."""
     stmt = sqlite_insert(models.StaffAttendance).values(
         date=date, staff_name=staff_name, status=status,
-        arrival_time=arrival_time, note=note, transfer=transfer, extra=extra,
+        arrival_time=arrival_time, note=note, transfer=transfer, extra=extra, star=star,
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["date", "staff_name"],
         set_={"status": stmt.excluded.status, "arrival_time": stmt.excluded.arrival_time,
-              "note": stmt.excluded.note, "transfer": stmt.excluded.transfer, "extra": stmt.excluded.extra},
+              "note": stmt.excluded.note, "transfer": stmt.excluded.transfer, "extra": stmt.excluded.extra,
+              "star": stmt.excluded.star},
     )
     db.execute(stmt)
 
 class StaffAttendanceIn(BaseModel):
     date:    str
-    records: dict  # {name: {status, arrival_time?, note?, transfer?, extra?}} — transfer: 0 | 0.5 | 1
+    records: dict  # {name: {status, arrival_time?, note?, transfer?, extra?, star?}} — transfer: 0 | 0.5 | 1
 
 @app.post("/staff-attendance")
 def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)):
@@ -613,7 +617,7 @@ def save_staff_attendance(data: StaffAttendanceIn, db: Session = Depends(get_db)
         _upsert_staff_attendance_row(
             db, data.date, name, rec.get("status", "present"),
             rec.get("arrival_time") or None, rec.get("note") or None,
-            float(rec.get("transfer", 0) or 0), bool(rec.get("extra", False)),
+            float(rec.get("transfer", 0) or 0), bool(rec.get("extra", False)), bool(rec.get("star", False)),
         )
     db.commit()
     _mark_staff_attendance_dirty()
@@ -625,12 +629,13 @@ class StaffAttendanceSingleIn(BaseModel):
     note:         str = ""
     transfer:     float = 0  # 0 = none, 0.5 = half day, 1 = full day
     extra:        bool = False
+    star:         bool = False
 
 @app.put("/staff-attendance/{date}/{staff_name}")
 def upsert_single_staff_attendance(date: str, staff_name: str, data: StaffAttendanceSingleIn, db: Session = Depends(get_db)):
     _upsert_staff_attendance_row(
         db, date, staff_name, data.status, data.arrival_time or None, data.note or None,
-        data.transfer, data.extra,
+        data.transfer, data.extra, data.star,
     )
     db.commit()
     _mark_staff_attendance_dirty()
@@ -653,7 +658,7 @@ def get_staff_attendance_month(month: str, db: Session = Depends(get_db)):
         if r.staff_name not in result:
             result[r.staff_name] = {}
         result[r.staff_name][r.date] = {"status": r.status, "arrival_time": r.arrival_time or "",
-                                         "transfer": r.transfer or 0, "extra": bool(r.extra)}
+                                         "transfer": r.transfer or 0, "extra": bool(r.extra), "star": bool(r.star)}
     return result
 
 # ── Staff tasks ───────────────────────────────────────────────────────────────
@@ -1039,8 +1044,10 @@ def meal_attendance_history(kid_id: str):
 
 # ── Child stars ───────────────────────────────────────────────────────────────
 # Primary School reward mark (⭐ on a present kid's avatar in the Journal),
-# 0-3 per day, kept forever — not reset weekly, Ольга asked for a running
-# history instead (see child's calendar).
+# one per day, kept forever — not reset weekly, Ольга asked for a running
+# history instead (see child's calendar). The weekly total shown as a
+# badge-on-the-star is a read-side rollup over these same rows, not a
+# separate counter — nothing resets, the week just starts summing from 0.
 
 @app.get("/child-stars/{date}")
 def get_child_stars(date: str):
@@ -1048,7 +1055,7 @@ def get_child_stars(date: str):
 
 class ChildStarsIn(BaseModel):
     date:   str
-    counts: dict  # {kid_id: 0-3}
+    counts: dict  # {kid_id: 0 or 1}
 
 @app.post("/child-stars")
 def save_child_stars(data: ChildStarsIn, request: Request):
@@ -1058,6 +1065,10 @@ def save_child_stars(data: ChildStarsIn, request: Request):
 @app.get("/child-stars-history/{kid_id}")
 def child_stars_history(kid_id: str):
     return sheets_client.get_child_star_history(kid_id)
+
+@app.get("/child-stars-weekly/{date}")
+def child_stars_weekly(date: str):
+    return sheets_client.get_child_stars_weekly(date)
 
 # ── Payment log ───────────────────────────────────────────────────────────────
 

@@ -257,8 +257,8 @@ def upsert_club_attendance(club_name: str, date: str, child: str, status: str, m
 
 
 # ── Child stars (Primary School reward marks) ───────────────────────────────────
-# One row per (date, child), count 0-3 — how many stars a teacher gave that
-# child that day. Same id-based upsert as upsert_attendance/upsert_club_attendance
+# One row per (date, child), count 0 or 1 — whether a teacher gave that
+# child a star that day. Same id-based upsert as upsert_attendance/upsert_club_attendance
 # above, so a same-day rename updates the same row instead of forking one
 # under the new name.
 
@@ -315,6 +315,29 @@ def read_child_star_history(child: str) -> dict:
     finally:
         pool.putconn(conn)
     return {date: (count or 0) for date, count in rows}
+
+
+def read_child_stars_weekly(date: str) -> dict:
+    """{child: sum} of stars over the Mon-Sun calendar week containing
+    `date` — one query for the whole group rather than one per kid. Feeds
+    the little count-on-the-star badge in the Journal and on the profile
+    card; this is a read-side rollup, not a reset — the per-day rows
+    behind it (read_child_stars/read_child_star_history) are unaffected."""
+    pool = _require_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT child, SUM(count) FROM child_stars
+                   WHERE date >= date_trunc('week', %s::date)::date
+                     AND date <  date_trunc('week', %s::date)::date + 7
+                   GROUP BY child""",
+                (date, date),
+            )
+            rows = cur.fetchall()
+    finally:
+        pool.putconn(conn)
+    return {child: int(total or 0) for child, total in rows if child}
 
 
 # ── Payment log / Club payment log ─────────────────────────────────────────────
