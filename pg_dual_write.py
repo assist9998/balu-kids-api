@@ -327,10 +327,15 @@ def read_child_stars_weekly(date: str) -> dict:
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
+            # date is stored as text here (like every other date column in
+            # this schema, see upsert_attendance et al.) — the bare column
+            # needs an explicit ::date cast too, not just the bounds, or
+            # Postgres refuses the comparison outright (text >= date has no
+            # operator) rather than silently doing a string compare.
             cur.execute(
                 """SELECT child, SUM(count) FROM child_stars
-                   WHERE date >= date_trunc('week', %s::date)::date
-                     AND date <  date_trunc('week', %s::date)::date + 7
+                   WHERE date::date >= date_trunc('week', %s::date)::date
+                     AND date::date <  date_trunc('week', %s::date)::date + 7
                    GROUP BY child""",
                 (date, date),
             )
